@@ -45,6 +45,8 @@
   function stage(id, value) { $(id).textContent = text(value); }
   function argv(value) { return Array.isArray(value) ? value.map((item) => JSON.stringify(String(item))).join(" ") : "—"; }
   function renderDetail(task) {
+    const selected = state.tasks.findIndex((item) => item.id === task.id);
+    if (selected >= 0) state.tasks[selected] = task;
     $("task-panel").classList.remove("hidden"); $("detail-name").textContent = task.name; $("detail-database").textContent = `${task.database_name} · ${statusLabel(task.status)}`; $("detail-progress-bar").style.width = `${Math.min(100, Math.max(0, Number(task.progress_percent || 0)))}%`; $("detail-progress-label").textContent = `Общий прогресс: ${task.progress_percent || 0}% · исходный файл: ${task.source_filename}`;
     const live = task.masscan_live && task.masscan_live.chunk_no ? ` · поток: ${Math.round(task.masscan_live.rate_pps || 0)} п/с · найдено ${task.masscan_live.found_count || 0}` : "";
     stage("stage-scope-value", `${task.target_count} IP`); stage("stage-masscan-value", `${task.masscan_chunks.completed || 0}/${task.masscan_chunks.total || 0} чанков · ${task.open_port_count} открытых портов${live}`); stage("stage-httpx-value", `${task.httpx_chunks.completed || 0}/${task.httpx_chunks.total || 0} чанков`); stage("stage-results-value", `${task.result_count} совпадений`);
