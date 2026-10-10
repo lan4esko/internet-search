@@ -1,0 +1,65 @@
+name: Проверки проекта
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Проверка состава репозитория
+        run: python3 scripts/check_repository.py
+      - name: Установка на пустые тома и миграции
+        run: python3 scripts/bootstrap.py
+      - name: Модульные проверки
+        run: |
+          docker compose run --rm --no-deps -v "$PWD:/repo:ro" \
+            -e PYTHONPATH=/app:/repo/shared -w /repo api \
+            python -m unittest tests.unit.test_container_metrics tests.unit.test_masscan_formats -v
+      - name: Реальный TASK API и физическая база
+        run: >-
+          docker compose run --rm --no-deps
+          -e TASK_API_URL=http://api:8000
+          -v "$PWD/tests:/app/tests:ro"
+          api python -m unittest tests.integration.test_task_api -v
+      - name: Версии и состояние сервисов
+        if: always()
+        run: docker compose ps --all
+      - name: Очистка временных ресурсов CI
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Подготовка браузера
+        run: |
+          python3 -m venv /tmp/browser-tests
+          /tmp/browser-tests/bin/pip install -r tests/browser/requirements.txt
+          /tmp/browser-tests/bin/python -m playwright install --with-deps chromium
+          mkdir -p /tmp/browser-bin
+          /tmp/browser-tests/bin/python - <<'PY'
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              Path('/tmp/browser-bin/chromium').symlink_to(p.chromium.executable_path)
+          PY
+      - name: Проверки панели на моделируемом API
+        run: PATH="/tmp/browser-bin:$PATH" /tmp/browser-tests/bin/python -m unittest tests.browser.test_task_panel -v

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Internet Search — TASK pipeline</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <p class="eyebrow">REAL TARGET IDENTIFICATION</p>
+    <h1>Internet Search</h1>
+    <p class="lead">CIDR → IP → Masscan → IP:PORT → HTTPX → Fortinet fingerprint</p>
+  </header>
+  <main class="page">
+    <section class="card intro">
+      <div><p class="eyebrow">ЭТАП 0</p><h2>Создать TASK</h2><p>Загрузите неизменяемый CIDR-файл. Для TASK создаётся отдельная физическая PostgreSQL-база.</p></div>
+      <form id="task-form" class="task-form">
+        <label>Название TASK<input id="task-name" name="name" required maxlength="255" placeholder="Fortinet production"></label>
+        <label>CIDR-файл<input id="task-file" name="file" type="file" accept=".txt,text/plain" required></label>
+        <div class="grid two">
+          <label>Masscan chunk_size<input id="masscan-chunk-size" name="masscan_chunk_size" type="number" min="1" value="1000" required></label>
+          <label>HTTPX chunk_size<input id="httpx-chunk-size" name="httpx_chunk_size" type="number" min="1" value="200" required></label>
+          <label>Masscan ports<input id="masscan-ports" name="masscan_ports" value="443,10443" required></label>
+          <label>Masscan rate<input id="masscan-rate" name="masscan_rate" type="number" min="1" value="1000" required></label>
+          <label>Masscan workers<input id="masscan-workers" name="masscan_workers" type="number" min="1" value="1" required></label>
+          <label>HTTPX workers<input id="httpx-workers" name="httpx_workers" type="number" min="1" value="1" required></label>
+          <label>HTTPX rate limit<input id="httpx-rate-limit" name="httpx_rate_limit" type="number" min="1" value="50" required></label>
+        </div>
+        <div class="fingerprint"><strong>Fortinet fingerprint</strong><span>GET /remote/login, /remote/index, /ssl-vpn/login.html</span><span>ftnt-fortinet-grid · name=&quot;magic&quot; · SVPNCOOKIE</span></div>
+        <button class="primary" type="submit">Создать TASK и запустить конвейер</button><p id="task-form-message" class="message" role="status"></p>
+      </form>
+    </section>
+    <section class="card"><div class="section-head"><div><p class="eyebrow">TASKS</p><h2>Задания</h2></div><button id="refresh-tasks" class="secondary">Обновить</button></div><div id="tasks-empty" class="empty">Заданий пока нет.</div><div class="table-wrap"><table><thead><tr><th>TASK</th><th>Состояние</th><th>Прогресс</th><th>IP</th><th>IP:PORT</th><th>Fingerprint</th><th></th></tr></thead><tbody id="tasks-table"></tbody></table></div></section>
+    <section class="card"><div class="section-head"><div><p class="eyebrow">USAGE</p><h2>Нагрузка контейнеров</h2><p id="metrics-state" class="muted">Получаем метрики…</p></div><button id="refresh-metrics" class="secondary">Обновить</button></div><div class="table-wrap"><table><thead><tr><th>Сервис</th><th>Состояние</th><th>CPU</th><th>Память</th><th>PIDs</th><th>Сеть RX/TX</th></tr></thead><tbody id="metrics-table"></tbody></table></div></section>
+    <section id="task-panel" class="card hidden" aria-live="polite"><div class="section-head"><div><p class="eyebrow">TASK DETAILS</p><h2 id="detail-name">—</h2><p id="detail-database" class="muted"></p></div><div class="detail-actions"><button id="export-results" class="secondary">Экспорт</button><button id="delete-task" class="danger">Удалить</button></div></div><div class="pipeline"><div class="stage" id="stage-scope"><span>0</span><strong>IP из CIDR</strong><small id="stage-scope-value">—</small></div><div class="stage" id="stage-masscan"><span>1</span><strong>Masscan</strong><small id="stage-masscan-value">—</small></div><div class="stage" id="stage-httpx"><span>2</span><strong>HTTPX</strong><small id="stage-httpx-value">—</small></div><div class="stage" id="stage-results"><span>3</span><strong>Результаты</strong><small id="stage-results-value">—</small></div></div><div class="progress"><div id="detail-progress-bar"></div></div><p id="detail-progress-label" class="muted"></p><div class="tabs"><button class="tab active" data-tab="open-ports">Открытые порты</button><button class="tab" data-tab="results">Fortinet</button><button class="tab" data-tab="targets">IP и чанки</button></div><div id="detail-content"></div><p id="detail-message" class="message" role="status"></p></section>
+  </main><script src="/app.js"></script>
+</body>
+</html>

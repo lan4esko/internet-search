@@ -1,0 +1,155 @@
+# Read .env by default; APP_ENV_FILE allows an isolated deployment with --env-file.
+x-application: &application
+  env_file:
+    - ${APP_ENV_FILE:-.env}
+  environment:
+    DATABASE_URL: ${DATABASE_URL:?Generate .env with python3 scripts/bootstrap.py --init-only}
+  init: true
+  restart: unless-stopped
+
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    <<: *application
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
+    volumes:
+      - scope_data:/data/scope
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-internet_search}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Generate .env with python3 scripts/bootstrap.py --init-only}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-internet_search}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The task runner is the real pipeline for the current TASK model. It owns
+  # Masscan and HTTPX subprocesses and connects to the physical database of
+  # the TASK it claims from Redis.
+  task-runner:
+    build:
+      context: .
+      dockerfile: services/task-runner/Dockerfile
+    <<: *application
+    volumes:
+      - scope_data:/data/scope
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Generate .env with python3 scripts/bootstrap.py --init-only}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MASSCAN_WORKERS: ${MASSCAN_WORKERS:-1}
+      HTTPX_WORKERS: ${HTTPX_WORKERS:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: services/web/Dockerfile
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # Only this narrow proxy can access the Engine socket. It publishes no host port
+  # and is reachable only by metrics-agent, on an isolated internal network.
+  metrics-proxy:
+    build:
+      context: .
+      dockerfile: services/metrics-agent/Dockerfile
+    command: ["python", "-m", "app.proxy"]
+    user: "0:0"
+    environment:
+      METRICS_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-internet-search}
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    networks:
+      - metrics
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: unless-stopped
+
+  metrics-agent:
+    build:
+      context: .
+      dockerfile: services/metrics-agent/Dockerfile
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      METRICS_INTERVAL_SECONDS: ${METRICS_INTERVAL_SECONDS:-5}
+      METRICS_STALE_AFTER_SECONDS: ${METRICS_STALE_AFTER_SECONDS:-20}
+    networks:
+      - default
+      - metrics
+    depends_on:
+      redis:
+        condition: service_healthy
+      metrics-proxy:
+        condition: service_started
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: unless-stopped
+
+networks:
+  default:
+  metrics:
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  scope_data:
