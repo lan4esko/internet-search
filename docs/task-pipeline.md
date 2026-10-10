@@ -20,19 +20,19 @@ CIDR TXT → TASK database → IP rows → Masscan → open IP:PORT
 
 Пользователь создаёт TASK и загружает один TXT-файл. Файл сохраняется с SHA-256 и после создания не изменяется. Некорректный CIDR отклоняет загрузку.
 
-Параметры TASK задаются независимо: `masscan_chunk_size`, `httpx_chunk_size`, `masscan_rate`, список Masscan-портов, `masscan_workers`, `httpx_workers` и ограничение HTTPX `rate_limit`. Все они сохраняются в конфигурации конкретного запуска.
+Параметры TASK задаются независимо: `masscan_chunk_size`, `httpx_chunk_size`, `masscan_rate`, список Masscan-портов, формат вывода (`json`, `list`, `xml`), `masscan_workers`, `httpx_workers` и ограничение HTTPX `rate_limit`. Дополнительные argv-токены Masscan и HTTPX можно передать массивом; input/output-флаги, которыми управляет конвейер, отклоняются валидатором. Все значения сохраняются в конфигурации конкретного запуска.
 
 Все адреса CIDR разворачиваются, включая network и broadcast. Каждому IP назначается `source_chunk_no`. До Masscan используются `ready_for_masscan=true` и `masscan_status=pending`.
 
 ## Этап 1 — Masscan
 
-Worker выбирает свободные чанки, формирует временный файл IP и запускает реальный Masscan через `create_subprocess_exec` с `--includefile`, `--ports`, `--rate`, JSON output и raw-файлом.
+Worker выбирает свободные чанки, формирует временный файл IP и запускает реальный Masscan через `create_subprocess_exec` с `--includefile`, `--ports`, `--rate`, выбранным форматом output и raw-файлом. Дополнительные argv передаются отдельными аргументами процесса, без shell.
 
 Raw-файл сохраняется в каталоге TASK. Открытые порты записываются в `task_open_ports` с `masscan_open=true`, `httpx_ready=true` и `httpx_status=pending`. IP без открытого порта получает `masscan_status=closed` и не участвует в HTTPX. Закрытые порты не сохраняются.
 
 ## Этап 2 — HTTPX
 
-Worker выбирает строки, где `masscan_open=true`, `httpx_ready=true` и `httpx_status='pending'`. Формируется файл `IP:PORT`. Количество параллельных процессов задаётся `httpx_workers`, число потоков — профилем HTTPX, а `rate_limit` ограничивает частоту запросов; размер файла — `httpx_chunk_size`.
+Worker выбирает строки, где `masscan_open=true`, `httpx_ready=true` и `httpx_status='pending'`. Формируется файл `IP:PORT`. Количество параллельных процессов задаётся `httpx_workers`, число потоков — профилем HTTPX, а `rate_limit` ограничивает частоту запросов; дополнительные HTTPX argv позволяют включать поддерживаемые опции без изменения кода; размер файла — `httpx_chunk_size`.
 
 ## Fortinet fingerprint
 

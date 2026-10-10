@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import shlex
 from pathlib import Path
 from uuid import uuid4
 
@@ -26,6 +27,13 @@ TASK_DATA_DIR = Path(os.getenv("SCOPE_DATA_DIR", "/data/scope")) / "tasks"
 UPLOAD_CHUNK = 1024 * 1024
 FORTINET_PATHS = ["/remote/login", "/remote/index", "/ssl-vpn/login.html"]
 FORTINET_MATCH_STRINGS = ["ftnt-fortinet-grid", 'name="magic"', "SVPNCOOKIE"]
+MASSCAN_FORMATS = {"json", "list", "xml"}
+MASSCAN_RESERVED_ARGS = {"--includefile", "--ports", "--rate", "--output-format", "--output-filename"}
+HTTPX_RESERVED_ARGS = {
+    "-list", "-output", "-o", "-json", "-silent", "-no-color", "-disable-update-check",
+    "-no-fallback-scheme", "-include-response", "-threads", "-timeout", "-follow-redirects",
+    "-follow-host-redirects", "-path", "-match-string", "-rate-limit",
+}
 
 
 def parse_json_list(raw: str, field: str) -> list[str]:
@@ -36,6 +44,46 @@ def parse_json_list(raw: str, field: str) -> list[str]:
     if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
         raise HTTPException(status_code=422, detail=f"{field}: нужен непустой массив строк")
     return value
+
+
+def parse_extra_args(raw: str | None, field: str, reserved: set[str]) -> list[str]:
+    """Parse an argv fragment without ever turning it into a shell command."""
+    if raw is None or not raw.strip():
+        return []
+    try:
+        values = json.loads(raw) if raw.lstrip().startswith("[") else shlex.split(raw, comments=False, posix=True)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=f"{field}: JSON-массив или корректная строка аргументов") from error
+    if not isinstance(values, list) or not all(isinstance(item, str) and item for item in values):
+        raise HTTPException(status_code=422, detail=f"{field}: ожидается массив строк")
+    if len(values) > 64 or sum(len(item) for item in values) > 8192:
+        raise HTTPException(status_code=422, detail=f"{field}: слишком много аргументов")
+    for value in values:
+        if "\x00" in value or any(character in value for character in ("\n", "\r")):
+            raise HTTPException(status_code=422, detail=f"{field}: недопустимые управляющие символы")
+        if value.startswith("-") and value.split("=", 1)[0] in reserved:
+            raise HTTPException(status_code=422, detail=f"{field}: аргумент {value.split('=', 1)[0]} управляется TASK")
+    return values
+
+
+def command_preview(config: dict) -> dict[str, list[str]]:
+    masscan = [
+        "masscan", "--includefile", "{CIDR_SHARD}", "--ports", config["masscan_ports"],
+        "--rate", str(config["masscan_rate"]), "--output-format", config["masscan_output_format"],
+        "--output-filename", "{OUTPUT_FILE}", "--wait", "5", "--retries", "0",
+        *config["masscan_extra_args"],
+    ]
+    httpx = [
+        "httpx", "-list", "{OPEN_ENDPOINTS_FILE}", "-output", "{OUTPUT_JSONL}", "-json", "-silent",
+        "-no-color", "-disable-update-check", "-no-fallback-scheme", "-include-response",
+        "-threads", str(config["httpx"]["threads"]), "-timeout", str(config["httpx"]["timeout"]),
+        "-follow-redirects", "-follow-host-redirects", "-path", ",".join(config["httpx"]["paths"]),
+        *sum((["-match-string", value] for value in config["httpx"]["match_strings"]), []),
+    ]
+    if config["httpx"].get("rate_limit"):
+        httpx.extend(["-rate-limit", str(config["httpx"]["rate_limit"])])
+    httpx.extend(config["httpx_extra_args"])
+    return {"masscan": masscan, "httpx": httpx}
 
 
 async def save_upload(file: UploadFile, database_name: str) -> tuple[Path, str, str, list[tuple[str, int, str]]]:
@@ -83,9 +131,12 @@ async def create_task(
     httpx_chunk_size: int = Form(..., ge=1, le=100_000),
     masscan_ports: str = Form(...),
     masscan_rate: int = Form(..., ge=1, le=100_000),
+    masscan_output_format: str = Form("json"),
+    masscan_extra_args: str | None = Form(None),
     masscan_workers: int = Form(1, ge=1, le=32),
     httpx_workers: int = Form(1, ge=1, le=64),
     httpx_rate_limit: int | None = Form(None, ge=1, le=100_000),
+    httpx_extra_args: str | None = Form(None),
     httpx_paths: str = Form(json.dumps(FORTINET_PATHS)),
     httpx_schemes: str = Form('["http", "https"]'),
     file: UploadFile = File(...),
@@ -100,6 +151,10 @@ async def create_task(
         raise HTTPException(status_code=422, detail="Masscan ports должны быть числами") from error
     if not ports or any(port < 1 or port > 65535 for port in ports):
         raise HTTPException(status_code=422, detail="Masscan ports должны быть от 1 до 65535")
+    if masscan_output_format not in MASSCAN_FORMATS:
+        raise HTTPException(status_code=422, detail="masscan_output_format: json, list или xml")
+    parsed_masscan_extra = parse_extra_args(masscan_extra_args, "masscan_extra_args", MASSCAN_RESERVED_ARGS)
+    parsed_httpx_extra = parse_extra_args(httpx_extra_args, "httpx_extra_args", HTTPX_RESERVED_ARGS)
     paths = parse_json_list(httpx_paths, "httpx_paths")
     schemes = parse_json_list(httpx_schemes, "httpx_schemes")
     if any(scheme not in {"http", "https"} for scheme in schemes):
@@ -124,11 +179,15 @@ async def create_task(
         "httpx_chunk_size": httpx_chunk_size,
         "masscan_ports": ",".join(str(port) for port in sorted(set(ports))),
         "masscan_rate": masscan_rate,
+        "masscan_output_format": masscan_output_format,
+        "masscan_extra_args": parsed_masscan_extra,
         "masscan_workers": masscan_workers,
         "httpx_workers": httpx_workers,
         "httpx": httpx_config,
+        "httpx_extra_args": parsed_httpx_extra,
         "fingerprint": "fortinet-debug-scan-2.0",
     }
+    config["commands"] = command_preview(config)
     task = TaskRegistry(
         name=name.strip(), database_name=database_name, source_filename=filename,
         source_path=str(path), source_sha256=checksum, config=config,
@@ -142,8 +201,10 @@ async def create_task(
             "task_id": task.id, "name": task.name, "source_filename": filename,
             "source_sha256": checksum, "masscan_chunk_size": masscan_chunk_size,
             "httpx_chunk_size": httpx_chunk_size, "masscan_rate": masscan_rate,
-            "masscan_ports": config["masscan_ports"], "masscan_workers": masscan_workers,
-            "httpx_workers": httpx_workers, "httpx_config": json.dumps(httpx_config),
+            "masscan_ports": config["masscan_ports"], "masscan_output_format": masscan_output_format,
+            "masscan_extra_args": json.dumps(parsed_masscan_extra), "masscan_workers": masscan_workers,
+            "httpx_workers": httpx_workers,
+            "httpx_config": json.dumps({**httpx_config, "extra_args": parsed_httpx_extra}),
         })
         task_connection = await connect(database_name)
         try:

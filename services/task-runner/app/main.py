@@ -30,6 +30,7 @@ HTTPX_WORKERS = max(1, min(64, int(os.getenv("HTTPX_WORKERS", "1"))))
 ARTIFACT_ROOT = Path(os.getenv("SCOPE_DATA_DIR", "/data/scope")) / "tasks"
 GROUP = "task-runners"
 STREAM = "tasks.created"
+MASSCAN_OUTPUT_EXTENSIONS = {"json": "json", "list": "txt", "xml": "xml"}
 
 
 def task_url(database_name: str) -> str:
@@ -120,9 +121,12 @@ async def claim_masscan(connection: asyncpg.Connection, workers: int) -> list[in
     return [row["chunk_no"] for row in rows]
 
 
-def masscan_command(input_path: Path, output_path: Path, ports: str, rate: int) -> list[str]:
-    return ["masscan", "--includefile", str(input_path), "--ports", ports, "--rate", str(rate),
-            "--output-format", "json", "--output-filename", str(output_path), "--wait", "5", "--retries", "0"]
+def masscan_command(input_path: Path, output_path: Path, meta: asyncpg.Record) -> list[str]:
+    extra_args = json.loads(meta["masscan_extra_args"] or "[]") if isinstance(meta["masscan_extra_args"], str) else list(meta["masscan_extra_args"] or [])
+    return ["masscan", "--includefile", str(input_path), "--ports", meta["masscan_ports"],
+            "--rate", str(meta["masscan_rate"]), "--output-format", meta["masscan_output_format"],
+            "--output-filename", str(output_path), "--wait", "5", "--retries", "0",
+            *extra_args]
 
 
 async def run_process(command: list[str], timeout: int | None = None, on_stderr=None) -> tuple[int, str, str]:
@@ -174,12 +178,13 @@ async def process_masscan_chunk(connection: asyncpg.Connection, chunk_no: int, m
     if not rows:
         await connection.execute("UPDATE task_chunks SET status='completed',finished_at=now() WHERE stage='masscan' AND chunk_no=$1", chunk_no)
         return
-    raw_path = ARTIFACT_ROOT / str(meta["task_id"]) / "masscan" / f"chunk-{chunk_no}.json"
+    output_format = meta["masscan_output_format"]
+    raw_path = ARTIFACT_ROOT / str(meta["task_id"]) / "masscan" / f"chunk-{chunk_no}.{MASSCAN_OUTPUT_EXTENSIONS[output_format]}"
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"task-{meta['task_id']}-masscan-") as directory:
         input_path, output_path = Path(directory) / "targets.txt", Path(directory) / "masscan.json"
         input_path.write_text("".join(f"{row['ip']}\n" for row in rows), encoding="ascii")
-        command = masscan_command(input_path, output_path, meta["masscan_ports"], meta["masscan_rate"])
+        command = masscan_command(input_path, output_path, meta)
 
         async def status_update(line: str):
             match = re.search(r"rate:\s*([\d.]+)-kpps,\s*([\d.]+)% done,.*?found=(\d+)", line)
@@ -202,7 +207,7 @@ async def process_masscan_chunk(connection: asyncpg.Connection, chunk_no: int, m
             return
         if output_path.exists():
             shutil.copyfile(output_path, raw_path)
-        observations = parse_records(output_path, "json") if output_path.exists() else []
+        observations = parse_records(output_path, meta["masscan_output_format"]) if output_path.exists() else []
     requested = {row["ip"] for row in rows}
     observations = [item for item in observations if item["ip_address"] in requested]
     async with connection.transaction():
@@ -253,6 +258,7 @@ def httpx_command(input_path: Path, output_path: Path, config: dict) -> list[str
         command.extend(["-match-string", value])
     if config.get("rate_limit"):
         command.extend(["-rate-limit", str(config["rate_limit"])])
+    command.extend(config.get("extra_args") or [])
     return command
 
 

@@ -34,6 +34,8 @@ CREATE TABLE task_meta (
   httpx_chunk_size INTEGER NOT NULL CHECK (httpx_chunk_size > 0),
   masscan_rate INTEGER NOT NULL CHECK (masscan_rate > 0),
   masscan_ports TEXT NOT NULL,
+  masscan_output_format TEXT NOT NULL DEFAULT 'json' CHECK (masscan_output_format IN ('json','list','xml')),
+  masscan_extra_args JSONB NOT NULL DEFAULT '[]'::jsonb,
   masscan_workers INTEGER NOT NULL CHECK (masscan_workers > 0),
   httpx_workers INTEGER NOT NULL CHECK (httpx_workers > 0),
   httpx_config JSONB NOT NULL,
@@ -155,11 +157,12 @@ async def initialize_database(database_name: str, values: dict) -> None:
         await connection.execute(
             """INSERT INTO task_meta(task_id,task_name,source_filename,source_sha256,
                masscan_chunk_size,httpx_chunk_size,masscan_rate,masscan_ports,
-               masscan_workers,httpx_workers,httpx_config,status)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'provisioning')""",
+               masscan_output_format,masscan_extra_args,masscan_workers,httpx_workers,httpx_config,status)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::text,$10::jsonb,$11,$12,$13,'provisioning')""",
             values["task_id"], values["name"], values["source_filename"], values["source_sha256"],
             values["masscan_chunk_size"], values["httpx_chunk_size"], values["masscan_rate"],
-            values["masscan_ports"], values["masscan_workers"], values["httpx_workers"], values["httpx_config"],
+            values["masscan_ports"], values["masscan_output_format"], values["masscan_extra_args"],
+            values["masscan_workers"], values["httpx_workers"], values["httpx_config"],
         )
     finally:
         await connection.close()
