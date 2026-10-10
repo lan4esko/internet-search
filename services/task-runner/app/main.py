@@ -351,8 +351,13 @@ async def run_task(task_id: int) -> None:
         # A process/container restart must not leave claimed work permanently
         # stuck.  Replaying a claimed chunk is safe because all inserts are
         # idempotent and endpoint/result keys are unique.
-        await connection.execute("UPDATE task_chunks SET status='pending',started_at=NULL WHERE status='running'")
-        await connection.execute("UPDATE task_open_ports SET httpx_status='pending',httpx_ready=true WHERE httpx_status='running'")
+        await connection.execute("UPDATE task_chunks SET status='pending',started_at=NULL WHERE stage='masscan' AND status='running'")
+        # HTTPX chunk numbers are allocation records, not the identity of an
+        # endpoint.  If the process dies after claiming a chunk, release its
+        # endpoints and remove the unfinished allocation; otherwise the next
+        # claim would create a second chunk while the orphan stayed pending.
+        await connection.execute("UPDATE task_open_ports SET httpx_status='pending',httpx_ready=true,httpx_chunk_no=NULL WHERE httpx_status='running'")
+        await connection.execute("DELETE FROM task_chunks WHERE stage='httpx' AND status IN ('running','pending')")
         await set_registry(task_id, "running")
         if status == "provisioning":
             await expand_scope(connection, task_id)

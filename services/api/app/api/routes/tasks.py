@@ -193,7 +193,8 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx') AS httpx_total,
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='completed') AS httpx_completed,
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='running') AS httpx_running,
-                 (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='failed') AS httpx_failed
+                 (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='failed') AS httpx_failed,
+                 (SELECT httpx_chunk_size FROM task_meta WHERE task_id=$1) AS httpx_chunk_size
         """)
         live_masscan = await connection.fetchrow("""
           SELECT chunk_no,status_tail,rate_pps,progress_percent,found_count
@@ -204,7 +205,10 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
         await connection.close()
     total = int(counts["targets"] or 0)
     masscan_total = int(counts["masscan_total"] or 0)
-    httpx_total = int(counts["httpx_total"] or 0)
+    observed_httpx_total = int(counts["httpx_total"] or 0)
+    httpx_chunk_size = max(1, int(counts["httpx_chunk_size"] or 1))
+    httpx_total = ((int(counts["ports"] or 0) + httpx_chunk_size - 1) // httpx_chunk_size
+                   if counts["ports"] else observed_httpx_total)
     masscan_progress = (int(counts["masscan_completed"] or 0) / masscan_total * 50) if masscan_total else 0
     if live_masscan and masscan_total:
         live_percent = min(100.0, max(0.0, float(live_masscan["progress_percent"] or 0)))
