@@ -195,7 +195,7 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='running') AS httpx_running,
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='failed') AS httpx_failed,
                  (SELECT httpx_chunk_size FROM task_meta WHERE task_id=$1) AS httpx_chunk_size
-        """)
+        """, task_id)
         live_masscan = await connection.fetchrow("""
           SELECT chunk_no,status_tail,rate_pps,progress_percent,found_count
           FROM task_chunks WHERE stage='masscan' AND status='running'
