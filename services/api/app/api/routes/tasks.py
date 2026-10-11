@@ -59,11 +59,13 @@ PALO_ALTO_PANOS_ADMIN_MATCH_STRINGS = [
 FINGERPRINT_DEFAULTS = {
     "fortinet-debug-scan-2.0": {
         "paths": FORTINET_PATHS,
+        "schemes": ["http", "https"],
         "match_strings": FORTINET_MATCH_STRINGS,
         "match_policy": "any",
     },
     "paloalto-globalprotect-portal": {
         "paths": PALO_ALTO_PATHS,
+        "schemes": ["https"],
         "match_strings": PALO_ALTO_MATCH_STRINGS,
         "match_policy": "all",
         "status_codes": [200],
@@ -71,6 +73,7 @@ FINGERPRINT_DEFAULTS = {
     },
     "paloalto-panos-admin": {
         "paths": PALO_ALTO_PANOS_ADMIN_PATHS,
+        "schemes": ["https"],
         "match_strings": PALO_ALTO_PANOS_ADMIN_MATCH_STRINGS,
         "match_policy": "all",
         "status_codes": [200],
@@ -195,7 +198,10 @@ def normalize_config(payload: dict) -> dict:
     if output_format not in MASSCAN_FORMATS:
         raise HTTPException(status_code=422, detail="masscan_output_format: json, list или xml")
     paths = _string_list(payload.get("httpx_paths", nested_httpx.get("paths")), "httpx_paths", fingerprint_defaults["paths"])
-    schemes = _string_list(payload.get("httpx_schemes", nested_httpx.get("schemes")), "httpx_schemes", ["http", "https"])
+    schemes = _string_list(
+        payload.get("httpx_schemes", nested_httpx.get("schemes")),
+        "httpx_schemes", fingerprint_defaults.get("schemes", ["http", "https"]),
+    )
     if any(scheme not in {"http", "https"} for scheme in schemes):
         raise HTTPException(status_code=422, detail="httpx_schemes допускает только http и https")
     has_rate_limit = "httpx_rate_limit" in payload or "rate_limit" in nested_httpx
