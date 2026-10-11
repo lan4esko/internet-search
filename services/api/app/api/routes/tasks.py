@@ -120,8 +120,17 @@ def parse_extra_args(raw: str | list[str] | None, field: str, reserved: set[str]
     for value in values:
         if "\x00" in value or any(character in value for character in ("\n", "\r")):
             raise HTTPException(status_code=422, detail=f"{field}: недопустимые управляющие символы")
-        if value.startswith("-") and value.split("=", 1)[0] in reserved:
-            raise HTTPException(status_code=422, detail=f"{field}: аргумент {value.split('=', 1)[0]} управляется TASK")
+        # The web form stores one line per item, so a managed flag can arrive
+        # together with its value (for example, `-match-string \"marker\"`).
+        # Inspect the first argv token to prevent fingerprint flags from being
+        # smuggled through the free-form argument list.
+        try:
+            first_token = shlex.split(value, comments=False, posix=True)[0] if value.strip() else ""
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=f"{field}: JSON-массив содержит некорректный argv-токен") from error
+        flag = first_token.split("=", 1)[0]
+        if flag in reserved:
+            raise HTTPException(status_code=422, detail=f"{field}: аргумент {flag} управляется TASK")
     return values
 
 
