@@ -16,13 +16,22 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
-from app.models.task import TaskRegistry
+from app.models.task import SearchTemplate, TaskRegistry
 from app.redis import get_redis
-from app.schemas.task import TaskPage, TaskRead, TaskRetry
+from app.schemas.task import (
+    ConfigValidationRequest,
+    SearchTemplateCreate,
+    SearchTemplatePage,
+    SearchTemplateRead,
+    TaskPage,
+    TaskRead,
+    TaskRetry,
+)
 from app.task_db import connect, create_database, drop_database, initialize_database
 
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+templates_router = APIRouter(prefix="/templates", tags=["templates"])
 TASK_DATA_DIR = Path(os.getenv("SCOPE_DATA_DIR", "/data/scope")) / "tasks"
 UPLOAD_CHUNK = 1024 * 1024
 FORTINET_PATHS = ["/remote/login", "/remote/index", "/ssl-vpn/login.html"]
@@ -46,14 +55,19 @@ def parse_json_list(raw: str, field: str) -> list[str]:
     return value
 
 
-def parse_extra_args(raw: str | None, field: str, reserved: set[str]) -> list[str]:
+def parse_extra_args(raw: str | list[str] | None, field: str, reserved: set[str]) -> list[str]:
     """Parse an argv fragment without ever turning it into a shell command."""
-    if raw is None or not raw.strip():
+    if raw is None:
         return []
-    try:
-        values = json.loads(raw) if raw.lstrip().startswith("[") else shlex.split(raw, comments=False, posix=True)
-    except (json.JSONDecodeError, ValueError) as error:
-        raise HTTPException(status_code=422, detail=f"{field}: JSON-массив или корректная строка аргументов") from error
+    if isinstance(raw, list):
+        values = raw
+    else:
+        if not raw.strip():
+            return []
+        try:
+            values = json.loads(raw) if raw.lstrip().startswith("[") else shlex.split(raw, comments=False, posix=True)
+        except (json.JSONDecodeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=f"{field}: JSON-массив или корректная строка аргументов") from error
     if not isinstance(values, list) or not all(isinstance(item, str) and item for item in values):
         raise HTTPException(status_code=422, detail=f"{field}: ожидается массив строк")
     if len(values) > 64 or sum(len(item) for item in values) > 8192:
@@ -64,6 +78,88 @@ def parse_extra_args(raw: str | None, field: str, reserved: set[str]) -> list[st
         if value.startswith("-") and value.split("=", 1)[0] in reserved:
             raise HTTPException(status_code=422, detail=f"{field}: аргумент {value.split('=', 1)[0]} управляется TASK")
     return values
+
+
+def _integer(value, field: str, minimum: int, maximum: int, default=None) -> int:
+    if value is None or value == "":
+        value = default
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=f"{field}: ожидается целое число") from error
+    if result < minimum or result > maximum:
+        raise HTTPException(status_code=422, detail=f"{field}: допустимый диапазон {minimum}..{maximum}")
+    return result
+
+
+def _string_list(value, field: str, default: list[str] | None = None) -> list[str]:
+    if value is None:
+        value = default
+    if isinstance(value, str):
+        value = parse_json_list(value, field)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise HTTPException(status_code=422, detail=f"{field}: нужен непустой массив строк")
+    if len(value) > 64 or sum(len(item) for item in value) > 16_384:
+        raise HTTPException(status_code=422, detail=f"{field}: слишком много данных")
+    return value
+
+
+def normalize_config(payload: dict) -> dict:
+    """Validate UI/template values and produce the one canonical TASK config."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="config: нужен JSON-объект")
+    nested_httpx = payload.get("httpx") if isinstance(payload.get("httpx"), dict) else {}
+    raw_ports = payload.get("masscan_ports")
+    if isinstance(raw_ports, list):
+        raw_ports = ",".join(str(item) for item in raw_ports)
+    if not isinstance(raw_ports, str):
+        raise HTTPException(status_code=422, detail="masscan_ports: нужна строка портов через запятую")
+    try:
+        ports = [int(item.strip()) for item in raw_ports.split(",") if item.strip()]
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Masscan ports должны быть числами") from error
+    if not ports or any(port < 1 or port > 65535 for port in ports):
+        raise HTTPException(status_code=422, detail="Masscan ports должны быть от 1 до 65535")
+    output_format = str(payload.get("masscan_output_format", "json"))
+    if output_format not in MASSCAN_FORMATS:
+        raise HTTPException(status_code=422, detail="masscan_output_format: json, list или xml")
+    paths = _string_list(payload.get("httpx_paths", nested_httpx.get("paths")), "httpx_paths", FORTINET_PATHS)
+    schemes = _string_list(payload.get("httpx_schemes", nested_httpx.get("schemes")), "httpx_schemes", ["http", "https"])
+    if any(scheme not in {"http", "https"} for scheme in schemes):
+        raise HTTPException(status_code=422, detail="httpx_schemes допускает только http и https")
+    has_rate_limit = "httpx_rate_limit" in payload or "rate_limit" in nested_httpx
+    rate_limit = payload.get("httpx_rate_limit", nested_httpx.get("rate_limit"))
+    if rate_limit in ("", 0, "0"):
+        rate_limit = None
+    if rate_limit is not None:
+        rate_limit = _integer(rate_limit, "httpx_rate_limit", 1, 100_000)
+    httpx_config = {
+        "paths": paths,
+        "schemes": schemes,
+        "threads": _integer(payload.get("httpx_threads", nested_httpx.get("threads")), "httpx_threads", 1, 2_000, int(os.getenv("HTTPX_THREADS", "500"))),
+        "timeout": _integer(payload.get("httpx_timeout", nested_httpx.get("timeout")), "httpx_timeout", 1, 120, int(os.getenv("HTTPX_TIMEOUT", "5"))),
+        "follow_redirects": bool(payload.get("httpx_follow_redirects", nested_httpx.get("follow_redirects", True))),
+        "match_strings": FORTINET_MATCH_STRINGS,
+    }
+    if rate_limit is not None:
+        httpx_config["rate_limit"] = rate_limit
+    elif not has_rate_limit and os.getenv("HTTPX_RATE_LIMIT"):
+        httpx_config["rate_limit"] = int(os.environ["HTTPX_RATE_LIMIT"])
+    config = {
+        "masscan_chunk_size": _integer(payload.get("masscan_chunk_size"), "masscan_chunk_size", 1, 1_000_000),
+        "httpx_chunk_size": _integer(payload.get("httpx_chunk_size"), "httpx_chunk_size", 1, 100_000),
+        "masscan_ports": ",".join(str(port) for port in sorted(set(ports))),
+        "masscan_rate": _integer(payload.get("masscan_rate"), "masscan_rate", 1, 100_000),
+        "masscan_output_format": output_format,
+        "masscan_extra_args": parse_extra_args(payload.get("masscan_extra_args"), "masscan_extra_args", MASSCAN_RESERVED_ARGS),
+        "masscan_workers": _integer(payload.get("masscan_workers", 1), "masscan_workers", 1, 32),
+        "httpx_workers": _integer(payload.get("httpx_workers", 1), "httpx_workers", 1, 64),
+        "httpx": httpx_config,
+        "httpx_extra_args": parse_extra_args(payload.get("httpx_extra_args", nested_httpx.get("extra_args")), "httpx_extra_args", HTTPX_RESERVED_ARGS),
+        "fingerprint": "fortinet-debug-scan-2.0",
+    }
+    config["commands"] = command_preview(config)
+    return config
 
 
 def command_preview(config: dict) -> dict[str, list[str]]:
@@ -117,18 +213,15 @@ async def save_upload(file: UploadFile, database_name: str) -> tuple[Path, str, 
     return path, digest.hexdigest(), path.name, list(cidrs.values())
 
 
-async def preview_upload(file: UploadFile) -> dict:
-    """Validate a CIDR feed without creating a TASK or materialising IP rows."""
-    digest = hashlib.sha256()
-    data = await file.read(64 * 1024 * 1024 + 1)
+def analyze_cidr_text(raw_text: str, filename: str = "scope.txt", sample_subnets: int = 10) -> dict:
+    data = raw_text.encode("utf-8")
     if len(data) > 64 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="CIDR-файл больше 64 МиБ")
-    digest.update(data)
     networks: dict[str, int] = {}
     invalid = 0
     empty = 0
     valid_lines = 0
-    for line_no, raw in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+    for raw in raw_text.splitlines():
         value = raw.strip()
         if not value or value.startswith("#"):
             empty += 1
@@ -144,14 +237,23 @@ async def preview_upload(file: UploadFile) -> dict:
         valid_lines += 1
         networks.setdefault(str(network), network.num_addresses)
     return {
-        "filename": file.filename or "scope.txt",
-        "sha256": digest.hexdigest(),
+        "filename": filename or "scope.txt",
+        "sha256": hashlib.sha256(data).hexdigest(),
         "subnet_count": len(networks),
         "address_count": sum(networks.values()),
         "duplicate_count": max(0, valid_lines - len(networks)),
         "invalid_count": invalid,
         "empty_or_comment_count": empty,
+        "sample_subnets": list(networks)[:sample_subnets],
     }
+
+
+async def preview_upload(file: UploadFile) -> dict:
+    """Validate a CIDR feed without creating a TASK or materialising IP rows."""
+    data = await file.read(64 * 1024 * 1024 + 1)
+    if len(data) > 64 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CIDR-файл больше 64 МиБ")
+    return analyze_cidr_text(data.decode("utf-8", errors="replace"), file.filename or "scope.txt")
 
 
 async def update_registry(session: AsyncSession, task: TaskRegistry, **values) -> None:
@@ -182,49 +284,23 @@ async def create_task(
 ):
     if not name.strip():
         raise HTTPException(status_code=422, detail="Название TASK не может быть пустым")
-    try:
-        ports = [int(item.strip()) for item in masscan_ports.split(",") if item.strip()]
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail="Masscan ports должны быть числами") from error
-    if not ports or any(port < 1 or port > 65535 for port in ports):
-        raise HTTPException(status_code=422, detail="Masscan ports должны быть от 1 до 65535")
-    if masscan_output_format not in MASSCAN_FORMATS:
-        raise HTTPException(status_code=422, detail="masscan_output_format: json, list или xml")
-    parsed_masscan_extra = parse_extra_args(masscan_extra_args, "masscan_extra_args", MASSCAN_RESERVED_ARGS)
-    parsed_httpx_extra = parse_extra_args(httpx_extra_args, "httpx_extra_args", HTTPX_RESERVED_ARGS)
-    paths = parse_json_list(httpx_paths, "httpx_paths")
-    schemes = parse_json_list(httpx_schemes, "httpx_schemes")
-    if any(scheme not in {"http", "https"} for scheme in schemes):
-        raise HTTPException(status_code=422, detail="httpx_schemes допускает только http и https")
+    config = normalize_config({
+        "masscan_chunk_size": masscan_chunk_size,
+        "httpx_chunk_size": httpx_chunk_size,
+        "masscan_ports": masscan_ports,
+        "masscan_rate": masscan_rate,
+        "masscan_output_format": masscan_output_format,
+        "masscan_extra_args": masscan_extra_args,
+        "masscan_workers": masscan_workers,
+        "httpx_workers": httpx_workers,
+        "httpx_rate_limit": httpx_rate_limit,
+        "httpx_extra_args": httpx_extra_args,
+        "httpx_paths": httpx_paths,
+        "httpx_schemes": httpx_schemes,
+    })
 
     database_name = f"task_{uuid4().hex}"
     path, checksum, filename, cidrs = await save_upload(file, database_name)
-    httpx_config = {
-        "paths": paths,
-        "schemes": schemes,
-        "threads": int(os.getenv("HTTPX_THREADS", "500")),
-        "timeout": int(os.getenv("HTTPX_TIMEOUT", "5")),
-        "follow_redirects": True,
-        "match_strings": FORTINET_MATCH_STRINGS,
-    }
-    if httpx_rate_limit is not None:
-        httpx_config["rate_limit"] = httpx_rate_limit
-    elif os.getenv("HTTPX_RATE_LIMIT"):
-        httpx_config["rate_limit"] = int(os.environ["HTTPX_RATE_LIMIT"])
-    config = {
-        "masscan_chunk_size": masscan_chunk_size,
-        "httpx_chunk_size": httpx_chunk_size,
-        "masscan_ports": ",".join(str(port) for port in sorted(set(ports))),
-        "masscan_rate": masscan_rate,
-        "masscan_output_format": masscan_output_format,
-        "masscan_extra_args": parsed_masscan_extra,
-        "masscan_workers": masscan_workers,
-        "httpx_workers": httpx_workers,
-        "httpx": httpx_config,
-        "httpx_extra_args": parsed_httpx_extra,
-        "fingerprint": "fortinet-debug-scan-2.0",
-    }
-    config["commands"] = command_preview(config)
     task = TaskRegistry(
         name=name.strip(), database_name=database_name, source_filename=filename,
         source_path=str(path), source_sha256=checksum, config=config,
@@ -239,9 +315,9 @@ async def create_task(
             "source_sha256": checksum, "masscan_chunk_size": masscan_chunk_size,
             "httpx_chunk_size": httpx_chunk_size, "masscan_rate": masscan_rate,
             "masscan_ports": config["masscan_ports"], "masscan_output_format": masscan_output_format,
-            "masscan_extra_args": json.dumps(parsed_masscan_extra), "masscan_workers": masscan_workers,
-            "httpx_workers": httpx_workers,
-            "httpx_config": json.dumps({**httpx_config, "extra_args": parsed_httpx_extra}),
+            "masscan_extra_args": json.dumps(config["masscan_extra_args"]), "masscan_workers": config["masscan_workers"],
+            "httpx_workers": config["httpx_workers"],
+            "httpx_config": json.dumps({**config["httpx"], "extra_args": config["httpx_extra_args"]}),
         })
         task_connection = await connect(database_name)
         try:
@@ -260,6 +336,72 @@ async def create_task(
 @router.post("/preview-cidr")
 async def preview_cidr(file: UploadFile = File(...)):
     return await preview_upload(file)
+
+
+@templates_router.get("", response_model=SearchTemplatePage)
+async def list_templates(session: AsyncSession = Depends(get_session)):
+    rows = (await session.execute(select(SearchTemplate).order_by(SearchTemplate.updated_at.desc(), SearchTemplate.id.desc()))).scalars().all()
+    return {"items": rows, "total": len(rows)}
+
+
+@templates_router.post("", response_model=SearchTemplateRead, status_code=status.HTTP_201_CREATED)
+async def create_template(payload: SearchTemplateCreate, session: AsyncSession = Depends(get_session)):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Название шаблона не может быть пустым")
+    config = normalize_config(payload.config)
+    existing = await session.scalar(select(SearchTemplate).where(SearchTemplate.name == name))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Шаблон с таким названием уже существует")
+    template = SearchTemplate(name=name, config=config)
+    session.add(template)
+    await session.commit()
+    await session.refresh(template)
+    return template
+
+
+@templates_router.put("/{template_id}", response_model=SearchTemplateRead)
+async def update_template(template_id: int, payload: SearchTemplateCreate, session: AsyncSession = Depends(get_session)):
+    template = await session.get(SearchTemplate, template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Название шаблона не может быть пустым")
+    conflict = await session.scalar(select(SearchTemplate).where(SearchTemplate.name == name, SearchTemplate.id != template_id))
+    if conflict is not None:
+        raise HTTPException(status_code=409, detail="Шаблон с таким названием уже существует")
+    template.name = name
+    template.config = normalize_config(payload.config)
+    await session.commit()
+    await session.refresh(template)
+    return template
+
+
+@templates_router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_template(template_id: int, session: AsyncSession = Depends(get_session)):
+    template = await session.get(SearchTemplate, template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    await session.delete(template)
+    await session.commit()
+
+
+@templates_router.post("/validate")
+async def validate_template(payload: ConfigValidationRequest):
+    config = normalize_config(payload.config)
+    scope = None
+    if payload.cidr_text is not None:
+        scope = analyze_cidr_text(payload.cidr_text, payload.filename, payload.sample_subnets)
+    return {
+        "valid": True,
+        "mode": "dry-run",
+        "network_traffic": False,
+        "message": "Конфигурация проверена. Masscan и HTTPX не запускались, пакеты не отправлялись.",
+        "config": config,
+        "commands": config["commands"],
+        "scope": scope,
+    }
 
 
 @router.get("", response_model=TaskPage)
@@ -303,6 +445,12 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='completed') AS httpx_completed,
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='running') AS httpx_running,
                  (SELECT count(*) FROM task_chunks WHERE stage='httpx' AND status='failed') AS httpx_failed,
+                 (SELECT COALESCE(sum(packets_sent), 0) FROM task_chunks WHERE stage='masscan') AS masscan_packets_sent,
+                 (SELECT COALESCE(sum(found_count), 0) FROM task_chunks WHERE stage='masscan') AS masscan_found_count,
+                 (SELECT COALESCE(sum(response_count), 0) FROM task_chunks WHERE stage='httpx') AS httpx_response_count,
+                 (SELECT COALESCE(sum(matched_count), 0) FROM task_chunks WHERE stage='httpx') AS httpx_matched_count,
+                 (SELECT COALESCE(avg(rate_pps), 0) FROM task_chunks WHERE stage='masscan' AND rate_pps IS NOT NULL) AS masscan_avg_rate,
+                 (SELECT count(*) FROM task_events) AS event_count,
                  (SELECT httpx_chunk_size FROM task_meta WHERE task_id=$1) AS httpx_chunk_size
         """, task_id)
         live_masscan = await connection.fetchrow("""
@@ -333,6 +481,21 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
     result["masscan_chunks"] = {"total": masscan_total, "completed": int(counts["masscan_completed"] or 0), "running": int(counts["masscan_running"] or 0), "failed": int(counts["masscan_failed"] or 0)}
     result["httpx_chunks"] = {"total": httpx_total, "completed": int(counts["httpx_completed"] or 0), "running": int(counts["httpx_running"] or 0), "failed": int(counts["httpx_failed"] or 0)}
     result["masscan_live"] = dict(live_masscan) if live_masscan else {}
+    result["stats"] = {
+        "targets": total,
+        "open_ports": int(counts["ports"] or 0),
+        "results": int(counts["results"] or 0),
+        "masscan": {
+            "packets_sent": int(counts["masscan_packets_sent"] or 0),
+            "found_count": int(counts["masscan_found_count"] or 0),
+            "average_rate_pps": round(float(counts["masscan_avg_rate"] or 0), 2),
+        },
+        "httpx": {
+            "responses": int(counts["httpx_response_count"] or 0),
+            "matched": int(counts["httpx_matched_count"] or 0),
+        },
+        "events": int(counts["event_count"] or 0),
+    }
     return result
 
 

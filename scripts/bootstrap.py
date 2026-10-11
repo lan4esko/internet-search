@@ -18,9 +18,11 @@ def initialize_environment(path):
     if path.exists() or path.is_symlink():
         return False
     password = secrets.token_hex(32)
+    grafana_password = secrets.token_urlsafe(24)
     template = (ROOT / ".env.example").read_text(encoding="utf-8")
     content = template.replace("POSTGRES_PASSWORD=\n", f"POSTGRES_PASSWORD={password}\n")
     content = content.replace("DATABASE_URL=\n", f"DATABASE_URL=postgresql+asyncpg://app:{password}@postgres:5432/internet_search\n")
+    content = content.replace("GRAFANA_ADMIN_PASSWORD=\n", f"GRAFANA_ADMIN_PASSWORD={grafana_password}\n")
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(content)

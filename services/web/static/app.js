@@ -2,7 +2,7 @@
   "use strict";
 
   const API = "/api";
-  const state = { task: null, tasks: [], selectedTaskId: null, tab: "open-ports", timer: null, metricsTimer: null, eventsTimer: null, eventsCursor: 0, events: [], metricHistory: [], workerHistory: [], lastTabLoad: 0 };
+  const state = { task: null, tasks: [], templates: [], selectedTaskId: null, tab: "open-ports", timer: null, metricsTimer: null, eventsTimer: null, eventsCursor: 0, events: [], metricHistory: [], workerHistory: [], lastTabLoad: 0 };
   const $ = (id) => document.getElementById(id);
   const text = (value) => String(value ?? "");
   const statusLabel = (status) => ({ provisioning: "создание БД", queued: "в очереди", running: "работает", completed: "завершён", failed: "ошибка", cancelled: "отменён" }[status] || status);
@@ -46,6 +46,15 @@
   }
 
   async function refreshTasks() { try { const page = await request("/tasks?limit=100"); renderTasks(page); if (!state.task && page.items?.length) await selectTask(page.items[0].id); } catch (error) { message("task-form-message", error.message, true); } }
+  async function refreshTemplates() {
+    try {
+      const data = await request("/templates"); state.templates = data.items || [];
+      const select = $("template-select"); const selected = select.value; select.replaceChildren();
+      const empty = document.createElement("option"); empty.value = ""; empty.textContent = "Новый профиль"; select.append(empty);
+      state.templates.forEach((template) => { const option = document.createElement("option"); option.value = String(template.id); option.textContent = template.name; select.append(option); });
+      if (state.templates.some((template) => String(template.id) === selected)) select.value = selected;
+    } catch (error) { message("template-message", `Шаблоны: ${error.message}`, true); }
+  }
   const mib = (value) => value == null ? "—" : `${(Number(value) / 1048576).toFixed(1)} МиБ`;
   const bytes = (value) => value == null ? "—" : `${(Number(value) / 1048576).toFixed(1)} МиБ`;
   function drawChart(id, series, labels) {
@@ -64,6 +73,11 @@
 
   function stage(id, value) { $(id).textContent = text(value); }
   function argv(value) { return Array.isArray(value) ? value.map((item) => JSON.stringify(String(item))).join(" ") : "—"; }
+  function renderStats(task) {
+    const stats = task.stats || {}; const masscan = stats.masscan || {}; const httpx = stats.httpx || {};
+    const values = [["IP в scope", stats.targets ?? task.target_count], ["Открытые порты", stats.open_ports ?? task.open_port_count], ["Masscan пакеты", masscan.packets_sent ?? 0], ["Masscan найдено", masscan.found_count ?? 0], ["HTTPX ответов", httpx.responses ?? 0], ["Fortinet совпадений", httpx.matched ?? task.result_count]];
+    const box = $("task-stats"); box.replaceChildren(); values.forEach(([label, value]) => { const card = document.createElement("div"); card.className = "stat-card"; const title = document.createElement("span"); title.textContent = label; const number = document.createElement("strong"); number.textContent = formatNumber(value); card.append(title, number); box.append(card); });
+  }
   function renderDetail(task) {
     const selected = state.tasks.findIndex((item) => item.id === task.id);
     if (selected >= 0) state.tasks[selected] = task;
@@ -72,7 +86,7 @@
     const previousWorker = state.workerHistory.at(-1); const now = Date.now(); const elapsed = previousWorker ? Math.max(.1, (now - previousWorker.time) / 1000) : 1; state.workerHistory.push({ time: now, masscan: Number(task.masscan_live?.rate_pps || 0), httpx: previousWorker ? Math.max(0, (Number(task.result_count || 0) - previousWorker.responses) / elapsed) : 0, responses: Number(task.result_count || 0) }); state.workerHistory = state.workerHistory.slice(-60);
     stage("stage-scope-value", `${task.target_count} IP`); stage("stage-masscan-value", `${task.masscan_chunks.completed || 0}/${task.masscan_chunks.total || 0} чанков · ${task.open_port_count} открытых портов${live}`); stage("stage-httpx-value", `${task.httpx_chunks.completed || 0}/${task.httpx_chunks.total || 0} чанков`); stage("stage-results-value", `${task.result_count} совпадений`);
     ["stage-scope", "stage-masscan", "stage-httpx", "stage-results"].forEach((id) => $(id).classList.remove("done", "active")); if (task.target_count) $("stage-scope").classList.add("done"); if (task.masscan_chunks.running || (task.masscan_chunks.total && task.masscan_chunks.completed < task.masscan_chunks.total)) $("stage-masscan").classList.add("active"); if (task.httpx_chunks.running || (task.httpx_chunks.total && task.httpx_chunks.completed < task.httpx_chunks.total)) $("stage-httpx").classList.add("active"); if (task.result_count) $("stage-results").classList.add("done");
-    $("masscan-command").textContent = argv(task.config?.commands?.masscan); $("httpx-command").textContent = argv(task.config?.commands?.httpx); renderTaskTabs(); drawChart("worker-chart", [{ values: state.workerHistory.map((item) => item.masscan), className: "masscan" }, { values: state.workerHistory.map((item) => item.httpx), className: "httpx" }], [{ text: "Masscan п/с", className: "masscan" }, { text: "HTTPX отв/с", className: "httpx" }]);
+    $("masscan-command").textContent = argv(task.config?.commands?.masscan); $("httpx-command").textContent = argv(task.config?.commands?.httpx); renderStats(task); renderTaskTabs(); drawChart("worker-chart", [{ values: state.workerHistory.map((item) => item.masscan), className: "masscan" }, { values: state.workerHistory.map((item) => item.httpx), className: "httpx" }], [{ text: "Masscan п/с", className: "masscan" }, { text: "HTTPX отв/с", className: "httpx" }]);
   }
 
   const columns = { targets: [["ip", "IP"], ["source_chunk_no", "chunk"], ["masscan_status", "Masscan"], ["ready_for_masscan", "ready"]], results: [["id", "id"], ["ip", "ip"], ["port", "port"], ["protocol", "protocol"], ["url", "url"], ["status_code", "status"], ["title", "title"], ["matched", "matched"]], "open-ports": [["ip", "IP"], ["port", "port"], ["protocol", "protocol"], ["masscan_open", "Masscan"], ["httpx_status", "HTTPX"], ["httpx_chunk_no", "chunk"]] };
@@ -91,9 +105,47 @@
   async function pollEvents() { if (!state.task) return; await loadEvents(); state.eventsTimer = setTimeout(pollEvents, ["running", "queued", "provisioning"].includes(state.task.status) ? 900 : 2500); }
   async function pollTask() { if (!state.task) return; try { state.task = await request(`/tasks/${state.task.id}`); renderDetail(state.task); if (Date.now() - state.lastTabLoad > 2500 && state.tab !== "events") await loadTab(); if (["running", "queued", "provisioning"].includes(state.task.status)) state.timer = setTimeout(pollTask, 900); else await refreshTasks(); } catch (error) { message("detail-message", error.message, true); state.timer = setTimeout(pollTask, 2000); } }
 
+  function formConfig() {
+    const value = (id) => $(id).value.trim(); const lines = (id) => value(id).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    return { masscan_chunk_size: Number(value("masscan-chunk-size")), httpx_chunk_size: Number(value("httpx-chunk-size")), masscan_ports: value("masscan-ports"), masscan_rate: Number(value("masscan-rate")), masscan_output_format: value("masscan-output-format"), masscan_extra_args: lines("masscan-extra-args"), masscan_workers: Number(value("masscan-workers")), httpx_workers: Number(value("httpx-workers")), httpx_rate_limit: Number(value("httpx-rate-limit")) || null, httpx_extra_args: lines("httpx-extra-args"), httpx_paths: ["/remote/login", "/remote/index", "/ssl-vpn/login.html"], httpx_schemes: ["http", "https"], httpx_threads: 500, httpx_timeout: 5, httpx_follow_redirects: true };
+  }
+  function setField(id, value) { if ($(id) && value != null) $(id).value = value; }
+  function applyTemplateConfig(config) {
+    const httpx = config.httpx || {};
+    setField("masscan-chunk-size", config.masscan_chunk_size); setField("httpx-chunk-size", config.httpx_chunk_size); setField("masscan-ports", config.masscan_ports); setField("masscan-rate", config.masscan_rate); setField("masscan-output-format", config.masscan_output_format); setField("masscan-workers", config.masscan_workers); setField("httpx-workers", config.httpx_workers); setField("httpx-rate-limit", config.httpx_rate_limit ?? ""); setField("masscan-extra-args", (config.masscan_extra_args || []).join("\n")); setField("httpx-extra-args", (config.httpx_extra_args || httpx.extra_args || []).join("\n")); updateFormPreview();
+  }
+  async function saveTemplate() {
+    const name = $("template-name").value.trim(); if (!name) { message("template-message", "Введите название шаблона.", true); return; }
+    const selected = $("template-select").value; const method = selected ? "PUT" : "POST"; const path = selected ? `/templates/${selected}` : "/templates";
+    try { await request(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, config: formConfig() }) }); message("template-message", selected ? "Шаблон обновлён." : "Шаблон сохранён."); await refreshTemplates(); if (!selected) { const created = state.templates.find((item) => item.name === name); if (created) $("template-select").value = String(created.id); } } catch (error) { message("template-message", error.message, true); }
+  }
+  function loadTemplate() { const template = state.templates.find((item) => String(item.id) === $("template-select").value); if (!template) { message("template-message", "Выберите сохранённый шаблон.", true); return; } applyTemplateConfig(template.config); $("template-name").value = template.name; message("template-message", `Шаблон «${template.name}» загружен.`); }
+  async function deleteTemplate() { const selected = $("template-select").value; if (!selected) { message("template-message", "Выберите шаблон для удаления.", true); return; } try { await request(`/templates/${selected}`, { method: "DELETE" }); $("template-name").value = ""; message("template-message", "Шаблон удалён."); await refreshTemplates(); } catch (error) { message("template-message", error.message, true); } }
+  function openTemplateTest() { const dialog = $("template-dialog"); if (typeof dialog.showModal === "function") dialog.showModal(); else dialog.setAttribute("open", ""); }
+  function taskFormData(config, cidrText, filename) {
+    const form = new FormData(); const append = (key, value) => { if (value !== null && value !== undefined && value !== "") form.append(key, String(value)); };
+    append("name", `[TEST] ${$("template-name").value.trim() || "configuration"}`); append("masscan_chunk_size", config.masscan_chunk_size); append("httpx_chunk_size", config.httpx_chunk_size); append("masscan_ports", config.masscan_ports); append("masscan_rate", config.masscan_rate); append("masscan_output_format", config.masscan_output_format); append("masscan_workers", config.masscan_workers); append("httpx_workers", config.httpx_workers); append("httpx_rate_limit", config.httpx_rate_limit); append("masscan_extra_args", JSON.stringify(config.masscan_extra_args || [])); append("httpx_extra_args", JSON.stringify(config.httpx_extra_args || [])); append("httpx_paths", JSON.stringify(config.httpx_paths || [])); append("httpx_schemes", JSON.stringify(config.httpx_schemes || [])); form.append("file", new File([cidrText.endsWith("\n") ? cidrText : `${cidrText}\n`], filename || "test-scope.txt", { type: "text/plain" })); return form;
+  }
+  async function runTemplateLiveTest() {
+    const file = $("test-cidr-file").files?.[0]; if (!file) { message("template-test-message", "Выберите CIDR-файл для реального теста.", true); return; }
+    const config = formConfig(); const sampleCount = Number($("test-subnets").value) || 10; message("template-test-message", "Выделяем подсети и создаём ограниченный TASK…");
+    try {
+      const raw = await file.text(); const preview = await request("/templates/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ config, cidr_text: raw, filename: file.name, sample_subnets: sampleCount }) }); const sample = preview.scope?.sample_subnets || [];
+      if (!sample.length) throw new Error("В выбранном файле нет корректных IPv4 CIDR.");
+      const task = await request("/tasks", { method: "POST", body: taskFormData(config, sample.join("\n"), `test-${file.name}`) });
+      message("template-test-message", `Реальный тест запущен как TASK #${task.id}.`); $("template-test-output").textContent = `Выбрано подсетей: ${sample.length}\nTASK #${task.id} выполняется штатным Masscan → HTTPX worker-ом.`; $("template-dialog").close(); await refreshTasks(); await selectTask(task.id);
+    } catch (error) { message("template-test-message", `Реальный тест не запущен: ${error.message}`, true); }
+  }
+  async function runTemplateTest() {
+    const file = $("test-cidr-file").files?.[0]; const body = { config: formConfig(), sample_subnets: Number($("test-subnets").value) || 10 };
+    if (file) { body.filename = file.name; body.cidr_text = await file.text(); }
+    message("template-test-message", "Проверяем параметры и строим тестовые argv…"); $("template-test-output").textContent = "Выполняется проверка…";
+    try { const result = await request("/templates/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); $("test-masscan-command").textContent = argv(result.commands.masscan); $("test-httpx-command").textContent = argv(result.commands.httpx); const scope = result.scope ? `\nCIDR: ${result.scope.filename}\nПодсетей: ${formatNumber(result.scope.subnet_count)}\nIPv4: ${formatNumber(result.scope.address_count)}\nОшибочных строк: ${formatNumber(result.scope.invalid_count)}\nПример: ${(result.scope.sample_subnets || []).join(", ")}` : "\nCIDR-файл не выбран."; $("template-test-output").textContent = `${result.message}${scope}`; message("template-test-message", "Конфигурация корректна."); } catch (error) { $("template-test-output").textContent = error.message; message("template-test-message", "Проверка не пройдена.", true); }
+  }
+
   function updateFormPreview() {
     const value = (id) => $(id).value.trim();
-    const lines = (id) => value(id).split(/\s+/).filter(Boolean);
+    const lines = (id) => value(id).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
     const masscan = ["masscan", "--includefile", "{CIDR_SHARD}", "--ports", value("masscan-ports"), "--rate", value("masscan-rate"), "--output-format", value("masscan-output-format"), "--output-filename", "{OUTPUT_FILE}", "--wait", "5", "--retries", "0", ...lines("masscan-extra-args")];
     const httpx = ["httpx", "-list", "{OPEN_ENDPOINTS_FILE}", "-output", "{OUTPUT_JSONL}", "-json", "-silent", "-no-color", "-disable-update-check", "-no-fallback-scheme", "-include-response", "-threads", "500", "-timeout", "5", "-follow-redirects", "-follow-host-redirects", "-path", "/remote/login,/remote/index,/ssl-vpn/login.html", "-match-string", "ftnt-fortinet-grid", "-match-string", 'name="magic"', "-match-string", "SVPNCOOKIE", "-rate-limit", value("httpx-rate-limit"), ...lines("httpx-extra-args")];
     $("form-masscan-command").textContent = argv(masscan); $("form-httpx-command").textContent = argv(httpx);
@@ -104,8 +156,10 @@
   updateFormPreview();
   $("task-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); message("task-form-message", "Создаём TASK, физическую базу и сохраняем argv…"); try { const task = await request("/tasks", { method: "POST", body: form }); message("task-form-message", `TASK #${task.id} создан.`); event.currentTarget.reset(); updateFormPreview(); previewCidr(null); await refreshTasks(); await selectTask(task.id); } catch (error) { message("task-form-message", error.message, true); } });
   $("refresh-tasks").onclick = refreshTasks; $("refresh-metrics").onclick = refreshMetrics;
+  $("load-template").onclick = loadTemplate; $("save-template").onclick = saveTemplate; $("delete-template").onclick = deleteTemplate; $("test-template").onclick = openTemplateTest; $("run-template-test").onclick = runTemplateTest; $("run-template-live-test").onclick = runTemplateLiveTest;
+  $("template-select").addEventListener("change", () => { const template = state.templates.find((item) => String(item.id) === $("template-select").value); if (template) $("template-name").value = template.name; });
   document.querySelector(".tabs").addEventListener("click", (event) => { const button = event.target.closest("[data-tab]"); if (!button) return; document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active")); button.classList.add("active"); state.tab = button.dataset.tab; loadTab(); });
   $("delete-task").onclick = async () => { if (!state.task) return; try { await request(`/tasks/${state.task.id}`, { method: "DELETE" }); state.task = null; state.selectedTaskId = null; $("task-panel").classList.add("hidden"); await refreshTasks(); } catch (error) { message("detail-message", error.message, true); } };
   $("export-results").onclick = async () => { if (!state.task) return; try { const data = await request(`/tasks/${state.task.id}/export`); const blob = new Blob([data.targets.join("\n") + (data.targets.length ? "\n" : "")], { type: "text/plain;charset=utf-8" }); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `task-${state.task.id}-fortinet.txt`; link.click(); URL.revokeObjectURL(link.href); } catch (error) { message("detail-message", error.message, true); } };
-  refreshTasks(); refreshMetrics(); state.metricsTimer = setInterval(refreshMetrics, 2500);
+  refreshTasks(); refreshTemplates(); refreshMetrics(); state.metricsTimer = setInterval(refreshMetrics, 2500);
 })();

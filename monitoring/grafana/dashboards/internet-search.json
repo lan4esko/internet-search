@@ -1,0 +1,19 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {"type":"timeseries","title":"CPU контейнеров","gridPos":{"h":8,"w":12,"x":0,"y":0},"targets":[{"expr":"internet_search_container_cpu_percent","legendFormat":"{{service}}"}],"fieldConfig":{"defaults":{"unit":"percent"}}},
+    {"type":"timeseries","title":"Память контейнеров","gridPos":{"h":8,"w":12,"x":12,"y":0},"targets":[{"expr":"internet_search_container_memory_usage_bytes","legendFormat":"{{service}}"}],"fieldConfig":{"defaults":{"unit":"bytes"}}},
+    {"type":"timeseries","title":"Сеть RX/TX","gridPos":{"h":8,"w":12,"x":0,"y":8},"targets":[{"expr":"rate(internet_search_container_network_rx_bytes[1m])","legendFormat":"RX {{service}}"},{"expr":"rate(internet_search_container_network_tx_bytes[1m])","legendFormat":"TX {{service}}"}],"fieldConfig":{"defaults":{"unit":"Bps"}}},
+    {"type":"timeseries","title":"TASK по состояниям","gridPos":{"h":8,"w":12,"x":12,"y":8},"targets":[{"expr":"internet_search_tasks_total","legendFormat":"{{status}}"}]}
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["internet-search"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "title": "Internet Search / pipeline health",
+  "uid": "internet-search-health",
+  "version": 1
+}

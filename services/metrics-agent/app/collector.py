@@ -8,6 +8,7 @@ from redis import Redis
 
 
 KEY = "internet-search:container-metrics"
+HISTORY_KEY = "internet-search:container-metrics:history"
 
 
 def main():
@@ -25,7 +26,11 @@ def main():
                 raise ValueError("Metrics payload too large")
             payload = json.loads(body)
             payload.update(interval_seconds=interval, stale_after_seconds=stale_after)
-            redis.set(KEY, json.dumps(payload, allow_nan=False), ex=stale_after * 3)
+            encoded = json.dumps(payload, allow_nan=False)
+            redis.set(KEY, encoded, ex=stale_after * 3)
+            redis.lpush(HISTORY_KEY, encoded)
+            redis.ltrim(HISTORY_KEY, 0, 719)
+            redis.expire(HISTORY_KEY, 3600)
         except Exception as error:
             # Retain last known sample until expiry; API labels stale samples explicitly.
             print(f"Container metrics collection failed: {type(error).__name__}", flush=True)

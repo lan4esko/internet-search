@@ -21,6 +21,20 @@ Bootstrap создаёт `.env`, собирает API, Web, PostgreSQL, Redis, m
 Старые volumes не являются совместимым хранилищем нового TASK-конвейера;
 для новой архитектуры используйте чистый Compose project.
 
+## Мониторинг Grafana
+
+Базовая панель получает live-метрики через API. Для исторических графиков можно
+включить необязательный Prometheus/Grafana-профиль:
+
+```bash
+docker compose --profile monitoring up -d prometheus grafana
+```
+
+Prometheus доступен на `http://127.0.0.1:29090`, Grafana — на
+`http://127.0.0.1:23000`. Дашборд и datasource создаются автоматически. Пароль
+администратора генерируется `scripts/bootstrap.py` и хранится только в `.env`
+с правами `0600`; не публикуйте его в Git.
+
 ## PostgreSQL
 
 Контрольная БД задаётся через `DATABASE_URL` и обычно называется

@@ -7,7 +7,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.db.base import Base
-from app.models import TaskRegistry  # noqa: F401
+from app.models import SearchTemplate, TaskRegistry  # noqa: F401
 
 
 config = context.config
