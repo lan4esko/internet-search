@@ -248,7 +248,15 @@ def normalize_config(payload: dict) -> dict:
     if raw_title_contains is None:
         raw_title_contains = nested_httpx.get("title_contains")
     title_default = fingerprint_defaults.get("title_contains", [])
-    title_contains = _string_list(raw_title_contains, "httpx_title_contains", title_default) if (raw_title_contains is not None or title_default) else []
+    if isinstance(raw_title_contains, str):
+        try:
+            raw_title_contains = json.loads(raw_title_contains)
+        except json.JSONDecodeError as error:
+            raise HTTPException(status_code=422, detail="httpx_title_contains: нужен JSON-массив строк") from error
+    if raw_title_contains == [] or (raw_title_contains is None and not title_default):
+        title_contains = []
+    else:
+        title_contains = _string_list(raw_title_contains, "httpx_title_contains", title_default)
     httpx_method = str(payload.get("httpx_method", nested_httpx.get("method", "GET")) or "GET").upper()
     if httpx_method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS", "DELETE"}:
         raise HTTPException(status_code=422, detail="httpx_method: поддерживаются GET, HEAD, POST, PUT, PATCH, OPTIONS и DELETE")
@@ -444,8 +452,8 @@ async def create_task(
     httpx_tech_detect: str | None = Form(None),
     httpx_response_size_to_read: int | None = Form(None, ge=1, le=10_485_760),
     httpx_response_size_to_save: int | None = Form(None, ge=1, le=10_485_760),
-    httpx_paths: str = Form(json.dumps(FORTINET_PATHS)),
-    httpx_schemes: str = Form('["http", "https"]'),
+    httpx_paths: str | None = Form(None),
+    httpx_schemes: str | None = Form(None),
     fingerprint_id: str = Form("fortinet-debug-scan-2.0"),
     httpx_match_strings: str | None = Form(None),
     httpx_match_policy: str | None = Form(None),
@@ -663,6 +671,8 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
                  (SELECT COALESCE(sum(matched_count), 0) FROM task_chunks WHERE stage='httpx') AS httpx_matched_count,
                  (SELECT COALESCE(avg(rate_pps), 0) FROM task_chunks WHERE stage='masscan' AND rate_pps IS NOT NULL) AS masscan_avg_rate,
                  (SELECT count(*) FROM task_events) AS event_count,
+                 (SELECT status FROM task_meta WHERE task_id=$1) AS pipeline_stage,
+                 (SELECT COALESCE(sum(power(2::numeric, 32-masklen(network))), 0)::bigint FROM task_cidrs) AS scope_address_count,
                  (SELECT httpx_chunk_size FROM task_meta WHERE task_id=$1) AS httpx_chunk_size
         """, task_id)
         live_masscan = await connection.fetchrow("""
@@ -710,6 +720,8 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
     }
     result["pipeline"] = {
         "scope": {
+            "status": str(counts["pipeline_stage"]),
+            "address_count": int(counts["scope_address_count"] or 0),
             "cidrs": int(counts["cidrs"] or 0),
             "targets": total,
             "chunks": int(counts["target_chunks"] or 0),

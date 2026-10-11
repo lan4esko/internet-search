@@ -1,6 +1,8 @@
 """Smoke test for the TASK-centric panel using a deterministic API fixture."""
 import json
 import shutil
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path
 from unittest import SkipTest, TestCase
 from urllib.parse import urlsplit
@@ -31,12 +33,18 @@ class TaskPanelBrowserTests(TestCase):
         cls.playwright.stop()
 
     def setUp(self):
+        self.created_tasks = []
+        self.create_requests = []
+        self.hold_create = False
+        self.pending_create = None
+        self.create_failure = None
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
+        self.page.set_default_timeout(10000)
         self.errors = []
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.route("**/*", self.route)
         self.page.goto("http://panel.test/")
-        self.page.locator("#tasks-table tr").wait_for()
+        self.page.locator("#tasks-table tr").wait_for(state="attached")
 
     def tearDown(self):
         self.page.close()
@@ -61,10 +69,34 @@ class TaskPanelBrowserTests(TestCase):
                 "started_at": "2026-10-10T00:00:01Z", "finished_at": "2026-10-10T00:01:00Z",
                 "progress_percent": 100, "masscan_chunks": {"total": 2, "completed": 2, "running": 0, "failed": 0},
                 "httpx_chunks": {"total": 1, "completed": 1, "running": 0, "failed": 0}}
-        if path == "/tasks":
-            payload = {"items": [task], "total": 1, "limit": 100, "offset": 0}
+        if path == "/templates":
+            payload = {"items": [], "total": 0}
+        elif path == "/operations/container-metrics":
+            payload = {"containers": [], "status": "ok"}
+        elif path == "/tasks/preview-cidr":
+            payload = {"filename": "scope.txt", "sha256": "b" * 64,
+                       "subnet_count": 1, "address_count": 1, "duplicate_count": 0, "invalid_count": 0}
+        elif path == "/tasks" and route.request.method == "POST":
+            content_type = route.request.headers["content-type"]
+            body = b"Content-Type: " + content_type.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + route.request.post_data_buffer
+            fields = {part.get_param("name", header="content-disposition"): part.get_payload(decode=True).decode()
+                      for part in BytesParser(policy=default).parsebytes(body).iter_parts()}
+            self.create_requests.append(fields)
+            if self.create_failure:
+                route.fulfill(status=422, content_type="application/json", body=json.dumps({"detail": self.create_failure}))
+                return
+            created = {**task, "id": 8, "name": fields["name"], "status": "queued", "progress_percent": 0}
+            if self.hold_create:
+                self.pending_create = (route, created)
+                return
+            self.fulfill_create(route, created)
+            return
+        elif path == "/tasks":
+            payload = {"items": self.created_tasks + [task], "total": len(self.created_tasks) + 1, "limit": 100, "offset": 0}
         elif path == "/tasks/7":
             payload = task
+        elif path == "/tasks/8":
+            payload = self.created_tasks[0]
         elif path == "/tasks/7/open-ports":
             payload = {"items": [{"ip": "192.0.2.10", "port": 10443, "protocol": "tcp", "masscan_open": True, "httpx_ready": False, "httpx_status": "completed", "httpx_chunk_no": 1}], "total": 1, "limit": 200, "offset": 0}
         elif path == "/tasks/7/results":
@@ -75,9 +107,66 @@ class TaskPanelBrowserTests(TestCase):
             payload = {"task_id": 7, "count": 1, "targets": ["https://192.0.2.10:10443"]}
         route.fulfill(content_type="application/json", body=json.dumps(payload))
 
+    def fulfill_create(self, route, created):
+        self.created_tasks.append(created)
+        route.fulfill(status=202, content_type="application/json", body=json.dumps(created))
+
+    def fill_task(self, fingerprint="paloalto-panos-admin"):
+        self.page.locator("#task-name").fill("Palo Alto creation test")
+        self.page.locator("#fingerprint-id").select_option(fingerprint)
+        self.page.locator("#task-file").set_input_files({"name": "scope.txt", "mimeType": "text/plain", "buffer": b"192.0.2.1/32\n"})
+
+    def test_create_task_after_async_response_opens_details(self):
+        self.fill_task()
+        self.page.locator(".create-button").click()
+        self.page.wait_for_function("document.querySelector('#detail-name').textContent === 'Palo Alto creation test'")
+        self.assertEqual(len(self.create_requests), 1)
+        self.assertIn("TASK #8 создан", self.page.locator("#task-form-message").inner_text())
+        self.assertNotIn("reset", self.page.locator("#task-form-message").inner_text())
+        self.assertEqual(self.page.locator("#task-name").input_value(), "")
+        self.assertFalse(self.page.locator(".create-button").is_disabled())
+        self.assertEqual(self.page.locator(".task-tab.active strong").inner_text(), "TASK #8 · Palo Alto creation test")
+        fields = self.create_requests[0]
+        self.assertEqual(json.loads(fields["httpx_paths"]), ["/php/login.php"])
+        self.assertEqual(json.loads(fields["httpx_schemes"]), ["https"])
+        self.assertIn("window.Pan", json.loads(fields["httpx_match_strings"]))
+
+    def test_globalprotect_submission_keeps_its_paths(self):
+        self.fill_task("paloalto-globalprotect-portal")
+        self.page.locator(".create-button").click()
+        self.page.wait_for_function("document.querySelector('#detail-name').textContent === 'Palo Alto creation test'")
+        self.assertEqual(json.loads(self.create_requests[0]["httpx_paths"]), ["/global-protect/login.esp"])
+        self.assertEqual(json.loads(self.create_requests[0]["httpx_schemes"]), ["https"])
+
+    def test_pending_creation_blocks_duplicate_submissions(self):
+        self.hold_create = True
+        self.fill_task()
+        self.page.locator(".create-button").click()
+        self.page.wait_for_function("document.querySelector('.create-button').disabled")
+        self.page.evaluate("document.querySelector('#task-form').requestSubmit()")
+        self.assertEqual(len(self.create_requests), 1)
+        self.assertIsNotNone(self.pending_create)
+        self.fulfill_create(*self.pending_create)
+        self.page.wait_for_function("document.querySelector('#detail-name').textContent === 'Palo Alto creation test'")
+        self.page.wait_for_function("!document.querySelector('.create-button').disabled")
+        self.assertFalse(self.page.locator(".create-button").is_disabled())
+        self.assertEqual(len(self.create_requests), 1)
+
+    def test_failed_creation_keeps_inputs_and_allows_retry(self):
+        self.create_failure = "Некорректный CIDR"
+        self.fill_task()
+        self.page.locator(".create-button").click()
+        self.page.wait_for_function("document.querySelector('#task-form-message').textContent.includes('Некорректный CIDR')")
+        self.assertEqual(self.page.locator("#task-name").input_value(), "Palo Alto creation test")
+        self.assertEqual(self.page.locator("#task-file").evaluate("input => input.files.length"), 1)
+        self.assertFalse(self.page.locator(".create-button").is_disabled())
+        self.assertEqual(self.created_tasks, [])
+
     def test_task_progress_and_result_tabs(self):
+        self.page.locator(".task-directory > summary").click()
         self.page.get_by_role("button", name="Открыть", exact=True).click()
-        self.assertIn("100%", self.page.locator("#detail-progress-label").inner_text())
+        self.assertIn("100.0%", self.page.locator("#detail-progress-label").inner_text())
+        self.assertIn("100.0%", self.page.locator("#task-stats").inner_text())
         self.page.get_by_role("button", name="Совпадения", exact=True).click()
         self.page.get_by_text("https://192.0.2.10:10443", exact=True).wait_for()
         self.page.get_by_role("button", name="IP и чанки", exact=True).click()

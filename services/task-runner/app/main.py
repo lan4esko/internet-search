@@ -457,7 +457,7 @@ async def run_task(task_id: int) -> None:
         await connection.execute("DELETE FROM task_chunks WHERE stage='httpx' AND status IN ('running','pending')")
         await set_registry(task_id, "running")
         await emit_event(connection, "task", "TASK запущен worker-ом", payload={"task_id": task_id})
-        if status == "provisioning":
+        if status in {"provisioning", "expanding"}:
             await expand_scope(connection, task_id)
             meta = await connection.fetchrow("SELECT * FROM task_meta WHERE task_id=$1", task_id)
             await update_counts(task_id, connection)
@@ -487,6 +487,15 @@ async def run_task(task_id: int) -> None:
             await masscan_connection.close()
             await httpx_connection.close()
         await update_counts(task_id, connection)
+        failed_chunk = await connection.fetchrow("""
+          SELECT stage,chunk_no,error_message FROM task_chunks
+          WHERE status='failed' ORDER BY stage,chunk_no LIMIT 1
+        """)
+        if failed_chunk:
+            raise RuntimeError(
+                f"{failed_chunk['stage']} чанк {failed_chunk['chunk_no']}: "
+                f"{failed_chunk['error_message'] or 'процесс завершился с ошибкой'}"
+            )
         await connection.execute("UPDATE task_meta SET status='completed',finished_at=now() WHERE task_id=$1", task_id)
         await emit_event(connection, "task", "TASK завершён", payload={"task_id": task_id})
         await update_counts(task_id, connection)
