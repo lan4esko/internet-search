@@ -58,10 +58,19 @@
   const mib = (value) => value == null ? "—" : `${(Number(value) / 1048576).toFixed(1)} МиБ`;
   const bytes = (value) => value == null ? "—" : `${(Number(value) / 1048576).toFixed(1)} МиБ`;
   function drawChart(id, series, labels) {
-    const svg = $(id); if (!svg) return; svg.replaceChildren(); const width = Number(svg.viewBox.baseVal.width || 640); const height = Number(svg.viewBox.baseVal.height || 180); const values = series.flatMap((item) => item.values || []); const max = Math.max(1, ...values);
-    if (!values.length || values.every((value) => value === 0)) { const empty = document.createElementNS("http://www.w3.org/2000/svg", "text"); empty.setAttribute("x", "24"); empty.setAttribute("y", "92"); empty.setAttribute("class", "chart-empty"); empty.textContent = "Нет данных"; svg.append(empty); return; }
-    series.forEach((item) => { const points = (item.values || []).map((value, index) => `${(index / Math.max(1, item.values.length - 1)) * width},${height - (Number(value) / max) * (height - 16) - 8}`).join(" "); const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline"); line.setAttribute("points", points); line.setAttribute("class", `chart-line ${item.className || ""}`); svg.append(line); });
-    labels.forEach((label, index) => { const legend = document.createElementNS("http://www.w3.org/2000/svg", "text"); legend.setAttribute("x", String(12 + index * 105)); legend.setAttribute("y", String(height - 5)); legend.setAttribute("class", `chart-legend ${label.className || ""}`); legend.textContent = label.text; svg.append(legend); });
+    const svg = $(id); if (!svg) return; svg.replaceChildren();
+    const width = Number(svg.viewBox.baseVal.width || 640); const height = Number(svg.viewBox.baseVal.height || 180);
+    const padding = { top: 12, right: 10, bottom: 26, left: 10 }; const plotWidth = Math.max(1, width - padding.left - padding.right); const plotHeight = Math.max(1, height - padding.top - padding.bottom);
+    const normalized = series.map((item) => ({ ...item, values: (item.values || []).map((value) => { const number = Number(value); return Number.isFinite(number) ? Math.max(0, number) : 0; }) }));
+    const values = normalized.flatMap((item) => item.values); const hasData = values.some((value) => value > 0);
+    if (!values.length || !hasData) { const empty = document.createElementNS("http://www.w3.org/2000/svg", "text"); empty.setAttribute("x", String(padding.left + 14)); empty.setAttribute("y", String(padding.top + plotHeight / 2)); empty.setAttribute("class", "chart-empty"); empty.textContent = "Нет данных"; svg.append(empty); return; }
+    const max = Math.max(1, ...values); const pointCount = Math.max(1, ...normalized.map((item) => item.values.length));
+    normalized.forEach((item) => {
+      if (!item.values.length) return;
+      const points = item.values.map((value, index) => { const x = padding.left + (pointCount === 1 ? plotWidth / 2 : (index / (pointCount - 1)) * plotWidth); const y = padding.top + plotHeight - (value / max) * plotHeight; return `${x},${y}`; }).join(" ");
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline"); line.setAttribute("points", points); line.setAttribute("class", `chart-line ${item.className || ""}`); line.setAttribute("fill", "none"); svg.append(line);
+    });
+    labels.forEach((label, index) => { const legend = document.createElementNS("http://www.w3.org/2000/svg", "text"); legend.setAttribute("x", String(padding.left + index * 120)); legend.setAttribute("y", String(height - 7)); legend.setAttribute("class", `chart-legend ${label.className || ""}`); legend.textContent = label.text; svg.append(legend); });
   }
   async function refreshMetrics() {
     try {
@@ -154,6 +163,9 @@
   document.querySelectorAll("#task-form input, #task-form select, #task-form textarea").forEach((field) => field.addEventListener("input", updateFormPreview));
   $("task-file").addEventListener("change", (event) => previewCidr(event.target.files?.[0]));
   updateFormPreview();
+  drawChart("network-chart", [], [{ text: "RX", className: "rx" }, { text: "TX", className: "tx" }]);
+  drawChart("worker-chart", [], [{ text: "Masscan п/с", className: "masscan" }, { text: "HTTPX отв/с", className: "httpx" }]);
+  drawChart("container-chart", [], [{ text: "CPU всех контейнеров", className: "cpu" }]);
   $("task-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); message("task-form-message", "Создаём TASK, физическую базу и сохраняем argv…"); try { const task = await request("/tasks", { method: "POST", body: form }); message("task-form-message", `TASK #${task.id} создан.`); event.currentTarget.reset(); updateFormPreview(); previewCidr(null); await refreshTasks(); await selectTask(task.id); } catch (error) { message("task-form-message", error.message, true); } });
   $("refresh-tasks").onclick = refreshTasks; $("refresh-metrics").onclick = refreshMetrics;
   $("load-template").onclick = loadTemplate; $("save-template").onclick = saveTemplate; $("delete-template").onclick = deleteTemplate; $("test-template").onclick = openTemplateTest; $("run-template-test").onclick = runTemplateTest; $("run-template-live-test").onclick = runTemplateLiveTest;
