@@ -76,7 +76,7 @@ async def update_counts(task_id: int, task_connection: asyncpg.Connection) -> No
     counts = await task_connection.fetchrow("""
       SELECT (SELECT count(*) FROM task_targets) AS targets,
              (SELECT count(*) FROM task_open_ports) AS ports,
-             (SELECT count(*) FROM httpx_results) AS results
+             (SELECT count(*) FROM httpx_results WHERE matched=true) AS results
     """)
     control = await control_connection()
     try:
@@ -379,9 +379,10 @@ async def process_httpx_chunk(connection: asyncpg.Connection, task_id: int, chun
                   ON CONFLICT(ip,port,protocol,url) DO UPDATE SET status_code=EXCLUDED.status_code,title=EXCLUDED.title,webserver=EXCLUDED.webserver,headers=EXCLUDED.headers,body_preview=EXCLUDED.body_preview,matched=EXCLUDED.matched,match_details=EXCLUDED.match_details""",
                     result["ip"], result["port"], result["protocol"], result["url"], result["status_code"], result["title"], result["webserver"], json.dumps(result["headers"] or {}), result["body_preview"], result["matched"], json.dumps(result["match_details"]), chunk_no)
             await connection.execute("UPDATE task_open_ports SET httpx_status='completed' WHERE httpx_chunk_no=$1", chunk_no)
-            await connection.execute("UPDATE task_chunks SET status='completed',response_count=$2,matched_count=$2,status_tail=$3,finished_at=now(),raw_output_path=$4,raw_output_bytes=$5 WHERE stage='httpx' AND chunk_no=$1", chunk_no, len(results), tail, str(raw_path), raw_path.stat().st_size if raw_path.exists() else 0)
+            matched_count = sum(1 for result in results if result["matched"])
+            await connection.execute("UPDATE task_chunks SET status='completed',response_count=$2,matched_count=$3,status_tail=$4,finished_at=now(),raw_output_path=$5,raw_output_bytes=$6 WHERE stage='httpx' AND chunk_no=$1", chunk_no, len(results), matched_count, tail, str(raw_path), raw_path.stat().st_size if raw_path.exists() else 0)
             await emit_event(connection, "httpx", f"HTTPX завершил чанк {chunk_no}: ответов {len(results)}", payload={
-                "chunk": chunk_no, "responses": len(results), "artifact": str(raw_path),
+                "chunk": chunk_no, "responses": len(results), "matched": matched_count, "artifact": str(raw_path),
             })
         else:
             await connection.execute("UPDATE task_open_ports SET httpx_status='failed',httpx_ready=true WHERE httpx_chunk_no=$1", chunk_no)

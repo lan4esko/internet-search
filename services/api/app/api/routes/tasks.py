@@ -549,6 +549,7 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
           SELECT (SELECT count(*) FROM task_targets) AS targets,
                  (SELECT count(*) FROM task_open_ports) AS ports,
                  (SELECT count(*) FROM httpx_results) AS results,
+                 (SELECT count(*) FROM httpx_results WHERE matched=true) AS matched_results,
                  (SELECT count(*) FROM task_targets WHERE masscan_status='open') AS open_targets,
                  (SELECT count(*) FROM task_chunks WHERE stage='masscan') AS masscan_total,
                  (SELECT count(*) FROM task_chunks WHERE stage='masscan' AND status='completed') AS masscan_completed,
@@ -586,7 +587,7 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
     httpx_progress = (int(counts["httpx_completed"] or 0) / httpx_total * 50) if httpx_total else (50 if task.status == "completed" else 0)
     task.target_count = total
     task.open_port_count = int(counts["ports"] or 0)
-    task.result_count = int(counts["results"] or 0)
+    task.result_count = int(counts["matched_results"] or 0)
     await session.commit()
     await session.refresh(task)
     result = TaskRead.model_validate(task).model_dump()
@@ -597,7 +598,7 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
     result["stats"] = {
         "targets": total,
         "open_ports": int(counts["ports"] or 0),
-        "results": int(counts["results"] or 0),
+        "results": int(counts["matched_results"] or 0),
         "masscan": {
             "packets_sent": int(counts["masscan_packets_sent"] or 0),
             "found_count": int(counts["masscan_found_count"] or 0),
