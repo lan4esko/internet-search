@@ -256,6 +256,7 @@ def command_preview(config: dict) -> dict[str, list[str]]:
 async def save_upload(file: UploadFile, database_name: str) -> tuple[Path, str, str, list[tuple[str, int, str]]]:
     TASK_DATA_DIR.mkdir(parents=True, exist_ok=True)
     path = TASK_DATA_DIR / f"{database_name}.txt"
+    source_filename = Path(file.filename or "scope.txt").name[:255] or "scope.txt"
     digest = hashlib.sha256()
     cidrs: dict[str, tuple[str, int, str]] = {}
     line_no = 0
@@ -281,7 +282,7 @@ async def save_upload(file: UploadFile, database_name: str) -> tuple[Path, str, 
     if not cidrs:
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail="Файл не содержит IPv4 CIDR")
-    return path, digest.hexdigest(), path.name, list(cidrs.values())
+    return path, digest.hexdigest(), source_filename, list(cidrs.values())
 
 
 def analyze_cidr_text(raw_text: str, filename: str = "scope.txt", sample_subnets: int = 10) -> dict:
