@@ -46,7 +46,7 @@ def create_task(base: str, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scope", type=Path, help="TXT с IPv4 CIDR")
-    parser.add_argument("--api", default="http://127.0.0.1:8000")
+    parser.add_argument("--api", default="http://127.0.0.1:28210")
     parser.add_argument("--name", default="CLI TASK")
     parser.add_argument("--masscan-chunk-size", type=int, default=8192)
     parser.add_argument("--httpx-chunk-size", type=int, default=200)

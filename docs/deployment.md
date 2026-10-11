@@ -36,7 +36,7 @@ Bootstrap создаёт `.env`, собирает API, Web, PostgreSQL, Redis, m
 Порты Web и API по умолчанию привязаны к localhost. Для удалённой работы:
 
 ```bash
-ssh -N -L 8080:127.0.0.1:8080 user@server
+ssh -N -L 28280:127.0.0.1:28280 user@server
 ```
 
 Встроенной аутентификации нет; при внешнем доступе используйте reverse proxy с

@@ -7,7 +7,7 @@ python3 scripts/bootstrap.py
 docker compose up -d --wait
 ```
 
-Панель: `http://127.0.0.1:8080`. Создание TASK выполняется через `POST /api/tasks` и передаёт имя, CIDR-файл, два размера чанка, параметры Masscan и количество воркеров. В форме доступны формат Masscan и дополнительные argv для обоих инструментов; запрещённые конвейером input/output-флаги валидируются API.
+Панель: `http://127.0.0.1:28280`. API: `http://127.0.0.1:28210`. Создание TASK выполняется через `POST /api/tasks` и передаёт имя, CIDR-файл, два размера чанка, параметры Masscan и количество воркеров. В форме доступны формат Masscan и дополнительные argv для обоих инструментов; запрещённые конвейером input/output-флаги валидируются API.
 
 ## API
 
@@ -19,7 +19,9 @@ DELETE /api/tasks/{id}
 GET    /api/tasks/{id}/targets
 GET    /api/tasks/{id}/open-ports
 GET    /api/tasks/{id}/results
+GET    /api/tasks/{id}/events
 GET    /api/tasks/{id}/export
+POST   /api/tasks/preview-cidr
 POST   /api/tasks/{id}/retry
 ```
 
