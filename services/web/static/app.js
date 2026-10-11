@@ -2,7 +2,7 @@
   "use strict";
 
   const API = "/api";
-  const state = { task: null, tasks: [], tab: "open-ports", timer: null, metricsTimer: null, eventsTimer: null, eventsCursor: 0, events: [], metricHistory: [], workerHistory: [], lastTabLoad: 0 };
+  const state = { task: null, tasks: [], selectedTaskId: null, tab: "open-ports", timer: null, metricsTimer: null, eventsTimer: null, eventsCursor: 0, events: [], metricHistory: [], workerHistory: [], lastTabLoad: 0 };
   const $ = (id) => document.getElementById(id);
   const text = (value) => String(value ?? "");
   const statusLabel = (status) => ({ provisioning: "создание БД", queued: "в очереди", running: "работает", completed: "завершён", failed: "ошибка", cancelled: "отменён" }[status] || status);
@@ -12,17 +12,27 @@
   const formatRate = (value) => value == null ? "—" : `${formatBytes(value)}/с`;
 
   async function request(path, options = {}) {
-    const response = await fetch(`${API}${path}`, options); const raw = await response.text(); let data = null;
-    try { data = raw ? JSON.parse(raw) : null; } catch { data = { detail: raw }; }
-    if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${response.status}`);
-    return data;
+    const method = (options.method || "GET").toUpperCase(); let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await fetch(`${API}${path}`, options); const raw = await response.text(); let data = null;
+        try { data = raw ? JSON.parse(raw) : null; } catch { data = { detail: raw }; }
+        if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${response.status}`);
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (method !== "GET" || !(error instanceof TypeError) || attempt === 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    }
+    throw lastError || new Error("Не удалось выполнить запрос");
   }
 
   function renderTaskTabs() {
     const tabs = $("task-tabs"); tabs.replaceChildren();
     state.tasks.forEach((task) => {
-      const button = document.createElement("button"); button.className = "task-tab"; button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(state.task?.id === task.id));
-      if (state.task?.id === task.id) button.classList.add("active");
+      const button = document.createElement("button"); button.type = "button"; button.className = "task-tab"; button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(state.selectedTaskId === task.id));
+      if (state.selectedTaskId === task.id) button.classList.add("active");
       button.innerHTML = "<strong></strong><span></span>"; button.querySelector("strong").textContent = `TASK #${task.id} · ${task.name}`; button.querySelector("span").textContent = `${statusLabel(task.status)} · ${task.progress_percent ?? 0}%`; button.onclick = () => selectTask(task.id); tabs.append(button);
     });
   }
@@ -77,7 +87,7 @@
     if (!state.task) return; if (state.tab === "events") { renderEvents(); await loadEvents(); return; } $("detail-content").replaceChildren(); $("detail-content").textContent = "Загрузка…";
     try { const id = state.task.id; const endpoint = state.tab === "targets" ? `/tasks/${id}/targets?limit=200` : state.tab === "results" ? `/tasks/${id}/results?matched_only=true&limit=200` : `/tasks/${id}/open-ports?limit=200`; const data = await request(endpoint); $("detail-content").replaceChildren(renderItems(data, state.tab)); state.lastTabLoad = Date.now(); } catch (error) { message("detail-message", error.message, true); }
   }
-  async function selectTask(id) { clearTimeout(state.timer); clearTimeout(state.eventsTimer); state.eventsCursor = 0; state.events = []; try { state.task = await request(`/tasks/${id}`); renderDetail(state.task); await loadTab(); await loadEvents(); state.timer = setTimeout(pollTask, 900); state.eventsTimer = setTimeout(pollEvents, 900); } catch (error) { message("detail-message", error.message, true); } }
+  async function selectTask(id) { clearTimeout(state.timer); clearTimeout(state.eventsTimer); state.selectedTaskId = id; renderTaskTabs(); state.eventsCursor = 0; state.events = []; try { state.task = await request(`/tasks/${id}`); renderDetail(state.task); await loadTab(); await loadEvents(); state.timer = setTimeout(pollTask, 900); state.eventsTimer = setTimeout(pollEvents, 900); } catch (error) { message("detail-message", `TASK #${id}: ${error.message}. Повторите выбор TASK или обновите список.`, true); } }
   async function pollEvents() { if (!state.task) return; await loadEvents(); state.eventsTimer = setTimeout(pollEvents, ["running", "queued", "provisioning"].includes(state.task.status) ? 900 : 2500); }
   async function pollTask() { if (!state.task) return; try { state.task = await request(`/tasks/${state.task.id}`); renderDetail(state.task); if (Date.now() - state.lastTabLoad > 2500 && state.tab !== "events") await loadTab(); if (["running", "queued", "provisioning"].includes(state.task.status)) state.timer = setTimeout(pollTask, 900); else await refreshTasks(); } catch (error) { message("detail-message", error.message, true); state.timer = setTimeout(pollTask, 2000); } }
 
@@ -95,7 +105,7 @@
   $("task-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); message("task-form-message", "Создаём TASK, физическую базу и сохраняем argv…"); try { const task = await request("/tasks", { method: "POST", body: form }); message("task-form-message", `TASK #${task.id} создан.`); event.currentTarget.reset(); updateFormPreview(); previewCidr(null); await refreshTasks(); await selectTask(task.id); } catch (error) { message("task-form-message", error.message, true); } });
   $("refresh-tasks").onclick = refreshTasks; $("refresh-metrics").onclick = refreshMetrics;
   document.querySelector(".tabs").addEventListener("click", (event) => { const button = event.target.closest("[data-tab]"); if (!button) return; document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active")); button.classList.add("active"); state.tab = button.dataset.tab; loadTab(); });
-  $("delete-task").onclick = async () => { if (!state.task) return; try { await request(`/tasks/${state.task.id}`, { method: "DELETE" }); state.task = null; $("task-panel").classList.add("hidden"); await refreshTasks(); } catch (error) { message("detail-message", error.message, true); } };
+  $("delete-task").onclick = async () => { if (!state.task) return; try { await request(`/tasks/${state.task.id}`, { method: "DELETE" }); state.task = null; state.selectedTaskId = null; $("task-panel").classList.add("hidden"); await refreshTasks(); } catch (error) { message("detail-message", error.message, true); } };
   $("export-results").onclick = async () => { if (!state.task) return; try { const data = await request(`/tasks/${state.task.id}/export`); const blob = new Blob([data.targets.join("\n") + (data.targets.length ? "\n" : "")], { type: "text/plain;charset=utf-8" }); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `task-${state.task.id}-fortinet.txt`; link.click(); URL.revokeObjectURL(link.href); } catch (error) { message("detail-message", error.message, true); } };
   refreshTasks(); refreshMetrics(); state.metricsTimer = setInterval(refreshMetrics, 2500);
 })();
