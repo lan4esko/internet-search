@@ -45,6 +45,17 @@ PALO_ALTO_MATCH_STRINGS = [
     "/global-protect/portal/images/logo-pan-",
     'id="heading"',
 ]
+PALO_ALTO_PANOS_ADMIN_PATHS = ["/php/login.php"]
+PALO_ALTO_PANOS_ADMIN_MATCH_STRINGS = [
+    "window.Pan",
+    "Panos.browser",
+    "panos-panos-login.js",
+    "/styles/login/css/login-admin.css",
+    "/login/images/panw_new_logo_302_53.png",
+    'id="login_form"',
+    'name="authType"',
+    'name="challengeCookie"',
+]
 FINGERPRINT_DEFAULTS = {
     "fortinet-debug-scan-2.0": {
         "paths": FORTINET_PATHS,
@@ -57,6 +68,13 @@ FINGERPRINT_DEFAULTS = {
         "match_policy": "all",
         "status_codes": [200],
         "title_contains": ["GlobalProtect Portal"],
+    },
+    "paloalto-panos-admin": {
+        "paths": PALO_ALTO_PANOS_ADMIN_PATHS,
+        "match_strings": PALO_ALTO_PANOS_ADMIN_MATCH_STRINGS,
+        "match_policy": "all",
+        "status_codes": [200],
+        "title_contains": ["Login"],
     },
 }
 MASSCAN_FORMATS = {"json", "list", "xml"}

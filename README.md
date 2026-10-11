@@ -5,7 +5,7 @@
 ```text
 CIDR TXT → отдельная БД TASK → IP-чанки → Masscan
                               → открытые IP:PORT → HTTPX
-                              → Fortinet fingerprint → protocol://ip:port
+                              → vendor fingerprint → protocol://ip:port
 ```
 
 Приложение использует Docker Compose, PostgreSQL, Redis, Masscan и ProjectDiscovery HTTPX. Runtime не создаёт моковых результатов.
@@ -19,7 +19,7 @@ CIDR TXT → отдельная БД TASK → IP-чанки → Masscan
 - `task_targets` — все IP из CIDR, включая network и broadcast; `ip` является primary key;
 - `task_chunks` — состояние Masscan и HTTPX чанков;
 - `task_open_ports` — только порты, подтверждённые Masscan;
-- `httpx_results` — реальные HTTPX-ответы и совпадения Fortinet.
+- `httpx_results` — реальные HTTPX-ответы и совпадения выбранного fingerprint.
 
 Параметры `masscan_chunk_size` и `httpx_chunk_size` задаются отдельно. Числа Masscan и HTTPX workers задаются при создании TASK. Подробная спецификация: [docs/task-pipeline.md](docs/task-pipeline.md).
 
@@ -46,7 +46,7 @@ docker compose up -d --wait
 `[TEST]` и запускает штатный Masscan → HTTPX конвейер.
 
 Каждый TASK открывается отдельной вкладкой. Внутри вкладки доступны прогресс
-этапов, открытые `IP:PORT`, Fortinet-совпадения, IP-чанки, нагрузка контейнеров
+этапов, открытые `IP:PORT`, совпадения выбранного fingerprint, IP-чанки, нагрузка контейнеров
 сводка пакетов Masscan, ответов HTTPX, совпадений и сохранённые argv-команды. Формат Masscan и дополнительные аргументы обоих
 инструментов задаются до запуска; аргументы передаются напрямую процессу без
 shell, а флаги, которыми управляет сам конвейер, отклоняются.
@@ -70,6 +70,17 @@ SVPNCOOKIE
 ```
 
 HTTPX получает только Masscan-открытые `IP:PORT`. Экспорт TASK содержит уникальные строки `http://ip:port` или `https://ip:port`.
+
+## Palo Alto fingerprints
+
+Профиль `Palo Alto GlobalProtect` проверяет `/global-protect/login.esp` и
+маркеры GlobalProtect Portal. Профиль `Palo Alto PAN-OS Admin` проверяет
+`/php/login.php` и требует полный набор признаков из административной страницы:
+`window.Pan`, `Panos.browser`, `panos-panos-login.js`,
+`/styles/login/css/login-admin.css`,
+`/login/images/panw_new_logo_302_53.png`, `id="login_form"`,
+`name="authType"` и `name="challengeCookie"` при HTTP 200. Заголовки браузера,
+`PHPSESSID` и дата ответа в правило не входят.
 
 ## Документация
 
