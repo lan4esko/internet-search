@@ -117,6 +117,43 @@ async def save_upload(file: UploadFile, database_name: str) -> tuple[Path, str, 
     return path, digest.hexdigest(), path.name, list(cidrs.values())
 
 
+async def preview_upload(file: UploadFile) -> dict:
+    """Validate a CIDR feed without creating a TASK or materialising IP rows."""
+    digest = hashlib.sha256()
+    data = await file.read(64 * 1024 * 1024 + 1)
+    if len(data) > 64 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CIDR-файл больше 64 МиБ")
+    digest.update(data)
+    networks: dict[str, int] = {}
+    invalid = 0
+    empty = 0
+    valid_lines = 0
+    for line_no, raw in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            empty += 1
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError:
+            invalid += 1
+            continue
+        if not isinstance(network, ipaddress.IPv4Network):
+            invalid += 1
+            continue
+        valid_lines += 1
+        networks.setdefault(str(network), network.num_addresses)
+    return {
+        "filename": file.filename or "scope.txt",
+        "sha256": digest.hexdigest(),
+        "subnet_count": len(networks),
+        "address_count": sum(networks.values()),
+        "duplicate_count": max(0, valid_lines - len(networks)),
+        "invalid_count": invalid,
+        "empty_or_comment_count": empty,
+    }
+
+
 async def update_registry(session: AsyncSession, task: TaskRegistry, **values) -> None:
     for key, value in values.items():
         setattr(task, key, value)
@@ -218,6 +255,11 @@ async def create_task(
     except Exception as error:
         await update_registry(session, task, status="failed", error_message=str(error)[:1000])
     return task
+
+
+@router.post("/preview-cidr")
+async def preview_cidr(file: UploadFile = File(...)):
+    return await preview_upload(file)
 
 
 @router.get("", response_model=TaskPage)
@@ -334,6 +376,35 @@ async def get_results(task_id: int, matched_only: bool = False, limit: int = Que
     finally:
         await connection.close()
     return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/{task_id}/events")
+async def get_events(
+    task_id: int,
+    after_id: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+    session: AsyncSession = Depends(get_session),
+):
+    task = await task_or_404(task_id, session)
+    connection = await connect(task.database_name)
+    try:
+        rows = await connection.fetch(
+            """SELECT id,stage,level,message,payload,created_at
+               FROM task_events WHERE id > $1 ORDER BY id LIMIT $2""",
+            after_id, limit,
+        )
+    finally:
+        await connection.close()
+    items = []
+    for row in rows:
+        item = dict(row)
+        if isinstance(item.get("payload"), str):
+            try:
+                item["payload"] = json.loads(item["payload"])
+            except json.JSONDecodeError:
+                pass
+        items.append(item)
+    return {"items": items, "last_id": int(items[-1]["id"]) if items else after_id}
 
 
 @router.post("/{task_id}/retry", response_model=dict)

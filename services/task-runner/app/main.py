@@ -85,6 +85,16 @@ async def update_counts(task_id: int, task_connection: asyncpg.Connection) -> No
         await control.close()
 
 
+async def emit_event(connection: asyncpg.Connection, stage: str, message: str,
+                     level: str = "info", payload: dict | None = None) -> None:
+    """Store a bounded operator-facing event in the physical TASK database."""
+    await connection.execute(
+        """INSERT INTO task_events(stage,level,message,payload)
+           VALUES($1,$2,$3,$4::jsonb)""",
+        stage, level, message[:2000], json.dumps(payload or {}, ensure_ascii=False),
+    )
+
+
 async def expand_scope(connection: asyncpg.Connection, task_id: int) -> None:
     await connection.execute("UPDATE task_meta SET status='expanding' WHERE task_id=$1", task_id)
     rows = await connection.fetch("SELECT network::text,source_line,original_value FROM task_cidrs ORDER BY network")
@@ -107,6 +117,11 @@ async def expand_scope(connection: asyncpg.Connection, task_id: int) -> None:
       ON CONFLICT(stage,chunk_no) DO NOTHING
     """)
     await connection.execute("UPDATE task_meta SET status='masscan' WHERE task_id=$1", task_id)
+    target_count = await connection.fetchval("SELECT count(*) FROM task_targets")
+    chunk_count = await connection.fetchval("SELECT count(*) FROM task_chunks WHERE stage='masscan'")
+    await emit_event(connection, "scope", "CIDR-развёртка завершена", payload={
+        "targets": int(target_count or 0), "chunks": int(chunk_count or 0),
+    })
 
 
 async def claim_masscan(connection: asyncpg.Connection, workers: int) -> list[int]:
@@ -181,12 +196,16 @@ async def process_masscan_chunk(connection: asyncpg.Connection, chunk_no: int, m
     output_format = meta["masscan_output_format"]
     raw_path = ARTIFACT_ROOT / str(meta["task_id"]) / "masscan" / f"chunk-{chunk_no}.{MASSCAN_OUTPUT_EXTENSIONS[output_format]}"
     raw_path.parent.mkdir(parents=True, exist_ok=True)
+    await emit_event(connection, "masscan", f"Запуск Masscan для чанка {chunk_no}", payload={"chunk": chunk_no})
     with tempfile.TemporaryDirectory(prefix=f"task-{meta['task_id']}-masscan-") as directory:
         input_path, output_path = Path(directory) / "targets.txt", Path(directory) / "masscan.json"
         input_path.write_text("".join(f"{row['ip']}\n" for row in rows), encoding="ascii")
         command = masscan_command(input_path, output_path, meta)
 
+        last_event_at = 0.0
+
         async def status_update(line: str):
+            nonlocal last_event_at
             match = re.search(r"rate:\s*([\d.]+)-kpps,\s*([\d.]+)% done,.*?found=(\d+)", line)
             if not match:
                 return
@@ -194,6 +213,10 @@ async def process_masscan_chunk(connection: asyncpg.Connection, chunk_no: int, m
                 "UPDATE task_chunks SET status_tail=$2,rate_pps=$3,progress_percent=$4,found_count=$5 WHERE stage='masscan' AND chunk_no=$1",
                 chunk_no, line[-2048:], float(match.group(1)) * 1000, float(match.group(2)), int(match.group(3)),
             )
+            now = time.monotonic()
+            if now - last_event_at >= 1.0:
+                last_event_at = now
+                await emit_event(connection, "masscan", line.strip(), payload={"chunk": chunk_no})
 
         returncode, _, tail = await run_process(command, on_stderr=status_update)
         if returncode != 0:
@@ -204,6 +227,7 @@ async def process_masscan_chunk(connection: asyncpg.Connection, chunk_no: int, m
                 shutil.copyfile(output_path, raw_path)
             await connection.execute("UPDATE task_chunks SET status='failed',error_message=$2,status_tail=$3,finished_at=now() WHERE stage='masscan' AND chunk_no=$1", chunk_no, tail or f"masscan exit {returncode}", tail)
             await connection.execute("UPDATE task_targets SET masscan_status='failed',ready_for_masscan=false,error_message=$2 WHERE source_chunk_no=$1 AND masscan_status='pending'", chunk_no, tail[:500])
+            await emit_event(connection, "masscan", f"Masscan завершился с ошибкой в чанке {chunk_no}", "error", {"chunk": chunk_no, "returncode": returncode})
             return
         if output_path.exists():
             shutil.copyfile(output_path, raw_path)
@@ -220,9 +244,13 @@ async def process_masscan_chunk(connection: asyncpg.Connection, chunk_no: int, m
             """, item["ip_address"], item["port"], item["protocol"], item["service_name"], item["banner"])
             await connection.execute("UPDATE task_targets SET masscan_status='open',masscan_finished_at=now() WHERE ip=$1", item["ip_address"])
         await connection.execute("UPDATE task_chunks SET status='completed',found_count=$2,status_tail=$3,progress_percent=100,finished_at=now(),raw_output_path=$4,raw_output_bytes=$5 WHERE stage='masscan' AND chunk_no=$1", chunk_no, len(observations), tail, str(raw_path), raw_path.stat().st_size if raw_path.exists() else 0)
+    await emit_event(connection, "masscan", f"Masscan завершил чанк {chunk_no}: открытых портов {len(observations)}", payload={
+        "chunk": chunk_no, "open_ports": len(observations), "artifact": str(raw_path),
+    })
 
 
 async def masscan_stage(connection: asyncpg.Connection, meta: asyncpg.Record) -> None:
+    database_name = meta["database_name"]
     while True:
         chunks = await claim_masscan(connection, meta["masscan_workers"])
         if not chunks:
@@ -231,7 +259,14 @@ async def masscan_stage(connection: asyncpg.Connection, meta: asyncpg.Record) ->
                 return
             await asyncio.sleep(1)
             continue
-        await asyncio.gather(*(process_masscan_chunk(connection, chunk, meta) for chunk in chunks))
+        async def process_claimed(chunk_no: int) -> None:
+            chunk_connection = await asyncpg.connect(task_url(database_name))
+            try:
+                await process_masscan_chunk(chunk_connection, chunk_no, meta)
+            finally:
+                await chunk_connection.close()
+
+        await asyncio.gather(*(process_claimed(chunk) for chunk in chunks))
 
 
 async def claim_httpx(connection: asyncpg.Connection, chunk_size: int) -> tuple[int, list[asyncpg.Record]] | None:
@@ -306,11 +341,25 @@ def parse_httpx_output(path: Path, chunk_no: int, config: dict) -> list[dict]:
 
 async def process_httpx_chunk(connection: asyncpg.Connection, task_id: int, chunk_no: int, rows: list[asyncpg.Record], config: dict) -> None:
     raw_path = ARTIFACT_ROOT / str(task_id) / "httpx" / f"chunk-{chunk_no}.jsonl"
+    await emit_event(connection, "httpx", f"Запуск HTTPX для чанка {chunk_no}", payload={"chunk": chunk_no, "endpoints": len(rows)})
     with tempfile.TemporaryDirectory(prefix="task-httpx-") as directory:
         input_path, output_path = Path(directory) / "open-endpoints.txt", Path(directory) / "httpx.jsonl"
         schemes = config.get("schemes") or ["http", "https"]
         input_path.write_text("".join(f"{scheme}://{row['ip']}:{row['port']}\n" for row in rows for scheme in schemes), encoding="ascii")
-        returncode, _, tail = await run_process(httpx_command(input_path, output_path, config), timeout=None)
+        last_event_at = 0.0
+
+        async def status_update(line: str):
+            nonlocal last_event_at
+            now = time.monotonic()
+            if now - last_event_at >= 1.0:
+                last_event_at = now
+                await connection.execute(
+                    "UPDATE task_chunks SET status_tail=$2 WHERE stage='httpx' AND chunk_no=$1",
+                    chunk_no, line[-2048:],
+                )
+                await emit_event(connection, "httpx", line.strip(), payload={"chunk": chunk_no})
+
+        returncode, _, tail = await run_process(httpx_command(input_path, output_path, config), timeout=None, on_stderr=status_update)
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.exists():
             shutil.copyfile(output_path, raw_path)
@@ -324,22 +373,39 @@ async def process_httpx_chunk(connection: asyncpg.Connection, task_id: int, chun
                     result["ip"], result["port"], result["protocol"], result["url"], result["status_code"], result["title"], result["webserver"], json.dumps(result["headers"] or {}), result["body_preview"], result["matched"], json.dumps(result["match_details"]), chunk_no)
             await connection.execute("UPDATE task_open_ports SET httpx_status='completed' WHERE httpx_chunk_no=$1", chunk_no)
             await connection.execute("UPDATE task_chunks SET status='completed',response_count=$2,matched_count=$2,status_tail=$3,finished_at=now(),raw_output_path=$4,raw_output_bytes=$5 WHERE stage='httpx' AND chunk_no=$1", chunk_no, len(results), tail, str(raw_path), raw_path.stat().st_size if raw_path.exists() else 0)
+            await emit_event(connection, "httpx", f"HTTPX завершил чанк {chunk_no}: ответов {len(results)}", payload={
+                "chunk": chunk_no, "responses": len(results), "artifact": str(raw_path),
+            })
         else:
             await connection.execute("UPDATE task_open_ports SET httpx_status='failed',httpx_ready=true WHERE httpx_chunk_no=$1", chunk_no)
             await connection.execute("UPDATE task_chunks SET status='failed',error_message=$2,status_tail=$3,finished_at=now() WHERE stage='httpx' AND chunk_no=$1", chunk_no, tail or f"httpx exit {returncode}", tail)
+            await emit_event(connection, "httpx", f"HTTPX завершился с ошибкой в чанке {chunk_no}", "error", {"chunk": chunk_no, "returncode": returncode})
 
 
-async def httpx_stage(connection: asyncpg.Connection, meta: asyncpg.Record) -> None:
+async def httpx_stage(connection: asyncpg.Connection, meta: asyncpg.Record,
+                      masscan_done: asyncio.Event, database_name: str) -> None:
     config = json.loads(meta["httpx_config"]) if isinstance(meta["httpx_config"], str) else dict(meta["httpx_config"])
     while True:
-        claimed = [item for item in await asyncio.gather(*(claim_httpx(connection, meta["httpx_chunk_size"]) for _ in range(meta["httpx_workers"]))) if item]
+        claimed = []
+        for _ in range(meta["httpx_workers"]):
+            item = await claim_httpx(connection, meta["httpx_chunk_size"])
+            if item:
+                claimed.append(item)
         if not claimed:
             pending = await connection.fetchval("SELECT count(*) FROM task_open_ports WHERE httpx_ready=true AND httpx_status='pending'")
-            if not pending:
+            if masscan_done.is_set() and not pending:
                 return
             await asyncio.sleep(1)
             continue
-        await asyncio.gather(*(process_httpx_chunk(connection, meta["task_id"], chunk_no, rows, config) for chunk_no, rows in claimed))
+        await connection.execute("UPDATE task_meta SET status='httpx' WHERE task_id=$1", meta["task_id"])
+        async def process_claimed(chunk_no: int, rows: list[asyncpg.Record]) -> None:
+            chunk_connection = await asyncpg.connect(task_url(database_name))
+            try:
+                await process_httpx_chunk(chunk_connection, meta["task_id"], chunk_no, rows, config)
+            finally:
+                await chunk_connection.close()
+
+        await asyncio.gather(*(process_claimed(chunk_no, rows) for chunk_no, rows in claimed))
 
 
 async def run_task(task_id: int) -> None:
@@ -365,20 +431,48 @@ async def run_task(task_id: int) -> None:
         await connection.execute("UPDATE task_open_ports SET httpx_status='pending',httpx_ready=true,httpx_chunk_no=NULL WHERE httpx_status='running'")
         await connection.execute("DELETE FROM task_chunks WHERE stage='httpx' AND status IN ('running','pending')")
         await set_registry(task_id, "running")
+        await emit_event(connection, "task", "TASK запущен worker-ом", payload={"task_id": task_id})
         if status == "provisioning":
             await expand_scope(connection, task_id)
             meta = await connection.fetchrow("SELECT * FROM task_meta WHERE task_id=$1", task_id)
             await update_counts(task_id, connection)
-        await masscan_stage(connection, meta)
+        # Keep the database name with the task metadata so stage workers can
+        # open an isolated connection per concurrently processed chunk.
+        meta = dict(meta)
+        meta["database_name"] = registry["database_name"]
+        # Run both stages together. HTTPX waits for the first open-port rows,
+        # then claims each completed Masscan chunk immediately; it only exits
+        # after Masscan is done and the HTTPX queue is empty.
+        masscan_connection = await asyncpg.connect(task_url(registry["database_name"]))
+        httpx_connection = await asyncpg.connect(task_url(registry["database_name"]))
+        masscan_done = asyncio.Event()
+
+        async def run_masscan_stage():
+            try:
+                await masscan_stage(masscan_connection, meta)
+            finally:
+                masscan_done.set()
+
+        try:
+            await asyncio.gather(
+                run_masscan_stage(),
+                httpx_stage(httpx_connection, meta, masscan_done, registry["database_name"]),
+            )
+        finally:
+            await masscan_connection.close()
+            await httpx_connection.close()
         await update_counts(task_id, connection)
-        await connection.execute("UPDATE task_meta SET status='httpx' WHERE task_id=$1", task_id)
-        await httpx_stage(connection, meta)
         await connection.execute("UPDATE task_meta SET status='completed',finished_at=now() WHERE task_id=$1", task_id)
+        await emit_event(connection, "task", "TASK завершён", payload={"task_id": task_id})
         await update_counts(task_id, connection)
         await set_registry(task_id, "completed")
     except Exception as error:
         LOGGER.exception("TASK %s failed", task_id)
         await connection.execute("UPDATE task_meta SET status='failed',error_message=$2,finished_at=now() WHERE task_id=$1", task_id, str(error)[:1000])
+        try:
+            await emit_event(connection, "task", f"TASK завершился с ошибкой: {str(error)[:500]}", "error", {"task_id": task_id})
+        except Exception:
+            LOGGER.exception("Не удалось записать событие TASK %s", task_id)
         await set_registry(task_id, "failed", str(error)[:1000])
     finally:
         await connection.close()
