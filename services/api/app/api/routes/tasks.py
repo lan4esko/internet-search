@@ -269,7 +269,13 @@ async def list_tasks(
 ):
     total = await session.scalar(select(text("count(*)")).select_from(text("task_registry")))
     rows = (await session.execute(select(TaskRegistry).order_by(TaskRegistry.id.desc()).limit(limit).offset(offset))).scalars().all()
-    return {"items": [TaskRead.model_validate(row).model_dump() for row in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+    items = []
+    for row in rows:
+        item = TaskRead.model_validate(row).model_dump()
+        if row.status == "completed":
+            item["progress_percent"] = 100.0
+        items.append(item)
+    return {"items": items, "total": int(total or 0), "limit": limit, "offset": offset}
 
 
 async def task_or_404(task_id: int, session: AsyncSession) -> TaskRegistry:

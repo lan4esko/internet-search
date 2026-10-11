@@ -23,14 +23,14 @@
     state.tasks.forEach((task) => {
       const button = document.createElement("button"); button.className = "task-tab"; button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(state.task?.id === task.id));
       if (state.task?.id === task.id) button.classList.add("active");
-      button.innerHTML = "<strong></strong><span></span>"; button.querySelector("strong").textContent = task.name; button.querySelector("span").textContent = `${statusLabel(task.status)} · ${task.progress_percent ?? 0}%`; button.onclick = () => selectTask(task.id); tabs.append(button);
+      button.innerHTML = "<strong></strong><span></span>"; button.querySelector("strong").textContent = `TASK #${task.id} · ${task.name}`; button.querySelector("span").textContent = `${statusLabel(task.status)} · ${task.progress_percent ?? 0}%`; button.onclick = () => selectTask(task.id); tabs.append(button);
     });
   }
 
   function renderTasks(page) {
     state.tasks = page.items || []; renderTaskTabs(); const table = $("tasks-table"); table.replaceChildren(); $("tasks-empty").classList.toggle("hidden", state.tasks.length !== 0);
     state.tasks.forEach((task) => {
-      const row = document.createElement("tr"); row.className = "task-row"; row.onclick = () => selectTask(task.id); [task.name, statusLabel(task.status), `${task.progress_percent ?? 0}%`, formatNumber(task.target_count), formatNumber(task.open_port_count), formatNumber(task.result_count)].forEach((value) => { const cell = document.createElement("td"); cell.textContent = text(value); row.append(cell); });
+      const row = document.createElement("tr"); row.className = "task-row"; row.onclick = () => selectTask(task.id); [`TASK #${task.id} · ${task.name}`, statusLabel(task.status), `${task.progress_percent ?? 0}%`, formatNumber(task.target_count), formatNumber(task.open_port_count), formatNumber(task.result_count)].forEach((value) => { const cell = document.createElement("td"); cell.textContent = text(value); row.append(cell); });
       const cell = document.createElement("td"); const button = document.createElement("button"); button.type = "button"; button.className = "secondary small open-task"; button.textContent = "Открыть"; button.onclick = (event) => { event.preventDefault(); event.stopPropagation(); selectTask(task.id); }; cell.append(button); row.append(cell); table.append(row);
     });
   }
