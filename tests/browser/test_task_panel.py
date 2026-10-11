@@ -78,7 +78,7 @@ class TaskPanelBrowserTests(TestCase):
     def test_task_progress_and_result_tabs(self):
         self.page.get_by_role("button", name="Открыть", exact=True).click()
         self.assertIn("100%", self.page.locator("#detail-progress-label").inner_text())
-        self.page.get_by_role("button", name="Fortinet", exact=True).click()
+        self.page.get_by_role("button", name="Совпадения", exact=True).click()
         self.page.get_by_text("https://192.0.2.10:10443", exact=True).wait_for()
         self.page.get_by_role("button", name="IP и чанки", exact=True).click()
         self.page.get_by_text("192.0.2.10", exact=True).wait_for()
