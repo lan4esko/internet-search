@@ -680,6 +680,11 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
           FROM task_chunks WHERE stage='masscan' AND status='running'
           ORDER BY chunk_no LIMIT 1
         """)
+        live_httpx = await connection.fetchrow("""
+          SELECT chunk_no,item_count,status_tail,started_at
+          FROM task_chunks WHERE stage='httpx' AND status='running'
+          ORDER BY chunk_no LIMIT 1
+        """)
     finally:
         await connection.close()
     total = int(counts["targets"] or 0)
@@ -703,6 +708,7 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
     result["masscan_chunks"] = {"total": masscan_total, "completed": int(counts["masscan_completed"] or 0), "running": int(counts["masscan_running"] or 0), "failed": int(counts["masscan_failed"] or 0)}
     result["httpx_chunks"] = {"total": httpx_total, "completed": int(counts["httpx_completed"] or 0), "running": int(counts["httpx_running"] or 0), "failed": int(counts["httpx_failed"] or 0)}
     result["masscan_live"] = dict(live_masscan) if live_masscan else {}
+    result["httpx_live"] = dict(live_httpx) if live_httpx else {}
     result["stats"] = {
         "targets": total,
         "open_ports": int(counts["ports"] or 0),
@@ -808,16 +814,23 @@ async def get_events(
     task_id: int,
     after_id: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=1000),
+    tail: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
     task = await task_or_404(task_id, session)
     connection = await connect(task.database_name)
     try:
-        rows = await connection.fetch(
-            """SELECT id,stage,level,message,payload,created_at
-               FROM task_events WHERE id > $1 ORDER BY id LIMIT $2""",
-            after_id, limit,
-        )
+        if tail and after_id == 0:
+            rows = list(reversed(await connection.fetch(
+                """SELECT id,stage,level,message,payload,created_at
+                   FROM task_events ORDER BY id DESC LIMIT $1""", limit,
+            )))
+        else:
+            rows = await connection.fetch(
+                """SELECT id,stage,level,message,payload,created_at
+                   FROM task_events WHERE id > $1 ORDER BY id LIMIT $2""",
+                after_id, limit,
+            )
     finally:
         await connection.close()
     items = []
@@ -860,12 +873,12 @@ async def retry_chunk(task_id: int, payload: TaskRetry, session: AsyncSession = 
 
 
 @router.get("/{task_id}/export", response_model=dict)
-async def export_results(task_id: int, matched_only: bool = True, session: AsyncSession = Depends(get_session)):
+async def export_results(task_id: int, session: AsyncSession = Depends(get_session)):
     task = await task_or_404(task_id, session)
     connection = await connect(task.database_name)
     try:
-        where = "WHERE matched=true" if matched_only else ""
-        rows = await connection.fetch(f"SELECT DISTINCT protocol || '://' || host(ip) || ':' || port::text AS target FROM httpx_results {where} ORDER BY target")
+        rows = await connection.fetch("""SELECT DISTINCT protocol || '://' || host(ip) || ':' || port::text AS target
+                                       FROM httpx_results WHERE matched=true ORDER BY target""")
     finally:
         await connection.close()
     return {"task_id": task.id, "count": len(rows), "targets": [row["target"] for row in rows]}

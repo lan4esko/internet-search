@@ -24,6 +24,7 @@ class TaskRead(BaseModel):
     masscan_chunks: dict = Field(default_factory=dict)
     httpx_chunks: dict = Field(default_factory=dict)
     masscan_live: dict = Field(default_factory=dict)
+    httpx_live: dict = Field(default_factory=dict)
     stats: dict = Field(default_factory=dict)
     pipeline: dict = Field(default_factory=dict)
 

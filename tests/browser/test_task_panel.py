@@ -5,7 +5,7 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 from unittest import SkipTest, TestCase
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 STATIC = Path(__file__).resolve().parents[2] / "services" / "web" / "static"
@@ -38,6 +38,8 @@ class TaskPanelBrowserTests(TestCase):
         self.hold_create = False
         self.pending_create = None
         self.create_failure = None
+        self.no_results = False
+        self.many_results = False
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
         self.page.set_default_timeout(10000)
         self.errors = []
@@ -69,6 +71,10 @@ class TaskPanelBrowserTests(TestCase):
                 "started_at": "2026-10-10T00:00:01Z", "finished_at": "2026-10-10T00:01:00Z",
                 "progress_percent": 100, "masscan_chunks": {"total": 2, "completed": 2, "running": 0, "failed": 0},
                 "httpx_chunks": {"total": 1, "completed": 1, "running": 0, "failed": 0}}
+        if self.no_results:
+            task["result_count"] = 0
+        elif self.many_results:
+            task["result_count"] = 201
         if path == "/templates":
             payload = {"items": [], "total": 0}
         elif path == "/operations/container-metrics":
@@ -100,9 +106,25 @@ class TaskPanelBrowserTests(TestCase):
         elif path == "/tasks/7/open-ports":
             payload = {"items": [{"ip": "192.0.2.10", "port": 10443, "protocol": "tcp", "masscan_open": True, "httpx_ready": False, "httpx_status": "completed", "httpx_chunk_no": 1}], "total": 1, "limit": 200, "offset": 0}
         elif path == "/tasks/7/results":
-            payload = {"items": [{"id": 1, "ip": "192.0.2.10", "port": 10443, "protocol": "https", "url": "https://192.0.2.10:10443", "status_code": 200, "title": "Please Login", "matched": True}], "total": 1, "limit": 200, "offset": 0}
+            offset = int(parse_qs(parsed.query).get("offset", ["0"])[0])
+            if self.many_results:
+                items = [{"id": i + 1, "ip": f"192.0.2.{i + 1}", "port": 10443, "protocol": "https", "url": f"https://192.0.2.{i + 1}:10443", "status_code": 200, "title": "Please Login", "matched": True}
+                         for i in range(offset, min(offset + 200, 201))]
+                total = 201
+            else:
+                items = [] if self.no_results or offset else [{"id": 1, "ip": "192.0.2.10", "port": 10443, "protocol": "https", "url": "https://192.0.2.10:10443", "status_code": 200, "title": "Please Login", "matched": True}]
+                total = 0 if self.no_results else 1
+            payload = {"items": items, "total": total, "limit": 200, "offset": offset}
         elif path == "/tasks/7/targets":
             payload = {"items": [{"ip": "192.0.2.10", "source_chunk_no": 1, "masscan_status": "open", "ready_for_masscan": False}], "total": 1, "limit": 200, "offset": 0}
+        elif path == "/tasks/7/events":
+            payload = {"items": [
+                {"id": 1, "stage": "masscan", "level": "info", "message": "Masscan завершил чанк 1", "payload": {"chunk": 1, "open_ports": 1}, "created_at": "2026-10-10T00:00:03Z"},
+                {"id": 2, "stage": "httpx", "level": "info", "message": "HTTPX завершил чанк 1", "payload": {"chunk": 1, "responses": 1, "matched": 1}, "created_at": "2026-10-10T00:00:04Z"},
+            ] if parsed.query.find("after_id=0") >= 0 else [], "last_id": 2}
+        elif path == "/tasks/7/export":
+            payload = {"task_id": 7, "count": 0 if self.no_results else 1,
+                       "targets": [] if self.no_results else ["https://192.0.2.10:10443"]}
         else:
             payload = {"task_id": 7, "count": 1, "targets": ["https://192.0.2.10:10443"]}
         route.fulfill(content_type="application/json", body=json.dumps(payload))
@@ -167,7 +189,34 @@ class TaskPanelBrowserTests(TestCase):
         self.page.get_by_role("button", name="Открыть", exact=True).click()
         self.assertIn("100.0%", self.page.locator("#detail-progress-label").inner_text())
         self.assertIn("100.0%", self.page.locator("#task-stats").inner_text())
-        self.page.get_by_role("button", name="Совпадения", exact=True).click()
-        self.page.get_by_text("https://192.0.2.10:10443", exact=True).wait_for()
-        self.page.get_by_role("button", name="IP и чанки", exact=True).click()
-        self.page.get_by_text("192.0.2.10", exact=True).wait_for()
+        self.page.locator("#detail-content .result-link").get_by_text("https://192.0.2.10:10443", exact=True).wait_for()
+        self.assertEqual(self.page.locator("#detail-content .endpoint-link").count(), 0)
+        self.assertFalse(self.page.locator("#task-diagnostics").evaluate("element => element.open"))
+        self.page.get_by_text("Masscan завершил чанк 1").wait_for()
+        self.page.get_by_text("HTTPX завершил чанк 1").wait_for()
+        self.assertNotIn("HTTPX завершил", self.page.locator("#masscan-log").inner_text())
+        self.assertNotIn("Masscan завершил", self.page.locator("#httpx-log").inner_text())
+        self.page.locator("#task-diagnostics > summary").click()
+        self.page.get_by_role("button", name="IP и чанки · IP(0)", exact=True).click()
+        self.page.locator("#diagnostic-content").get_by_text("192.0.2.10", exact=True).wait_for()
+
+    def test_no_ip2_shows_empty_result_instead_of_masscan_list(self):
+        self.no_results = True
+        self.page.locator(".task-directory > summary").click()
+        self.page.get_by_role("button", name="Открыть", exact=True).click()
+        self.page.locator("#detail-content").get_by_text("Подтверждённых IP(2) пока нет").wait_for()
+        self.assertEqual(self.page.locator("#detail-content table").count(), 0)
+        self.assertFalse(self.page.locator("#task-diagnostics").evaluate("element => element.open"))
+        self.page.locator("#export-results").click()
+        self.page.get_by_text("Подтверждённых IP(2) пока нет: экспортировать нечего.").wait_for()
+
+    def test_ip2_list_can_page_beyond_first_200_results(self):
+        self.many_results = True
+        self.page.locator(".task-directory > summary").click()
+        self.page.get_by_role("button", name="Открыть", exact=True).click()
+        self.page.get_by_text("Показано 1–200 из 201").wait_for()
+        self.page.get_by_role("button", name="Следующие", exact=True).click()
+        self.page.get_by_text("Показано 201–201 из 201").wait_for()
+        self.page.locator("#detail-content .result-link").get_by_text("https://192.0.2.201:10443", exact=True).wait_for()
+        self.page.get_by_role("button", name="Назад", exact=True).click()
+        self.page.get_by_text("Показано 1–200 из 201").wait_for()
