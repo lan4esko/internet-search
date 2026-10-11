@@ -2,11 +2,13 @@
 
 ## Цель
 
-Приложение находит разрешённые IPv4-цели с открытым TCP-портом и подтверждает Fortinet по реальному HTTP-ответу. Моковые результаты в runtime отсутствуют.
+Приложение находит разрешённые IPv4-цели с открытым TCP-портом и подтверждает
+выбранный fingerprint по реальному HTTP-ответу. Моковые результаты в runtime
+отсутствуют.
 
 ```text
-CIDR TXT → TASK database → IP rows → Masscan → open IP:PORT
-                                      → HTTPX → Fortinet fingerprint
+CIDR TXT → TASK database → ip(0) → Masscan → ip(1) = open IP:PORT
+                                      → HTTPX + fingerprint → ip(2) = confirmed target
                                       → protocol://ip:port
 ```
 
@@ -15,6 +17,20 @@ CIDR TXT → TASK database → IP rows → Masscan → open IP:PORT
 Контрольная база `internet_search` хранит реестр TASK и конфигурацию. При создании TASK PostgreSQL создаёт отдельную физическую базу `task_<uuid>`. Внутри неё находятся `task_meta`, `task_cidrs`, `task_targets`, `task_chunks`, `task_open_ports`, `httpx_results` и `task_events`.
 
 `task_targets.ip` — настоящий `PRIMARY KEY`; дубли IP внутри TASK невозможны. В `task_open_ports` ключом является `(ip, port, protocol)`.
+
+## Состояния цели
+
+Конвейер разделяет три состояния результата:
+
+```text
+ip(0) — исходный IP, развёрнутый из CIDR и ожидающий Masscan;
+ip(1) — IP:PORT, подтверждённый Masscan как открытый endpoint;
+ip(2) — protocol://IP:PORT, подтверждённый HTTPX и fingerprint.
+```
+
+`ip(2)` создаётся только при совпадении правил fingerprint. HTTPX-ответ без
+совпадения может сохраняться в `httpx_results` для диагностики с
+`matched=false`, но в итоговый экспорт не попадает.
 
 ## Этап 0 — загрузка и подготовка
 
@@ -40,9 +56,14 @@ Masscan и HTTPX работают как два согласованных эт�
 завершение чанков записываются в `task_events` и доступны во вкладке «Поток
 утилит».
 
-## Fortinet fingerprint
+## Fingerprint
 
-Fingerprint перенесён из `/home/kali/turbo/debug_scan_2.0_.sh` без расширения логики:
+Профиль выбирается в конкретном TASK. В проекте есть рабочие профили Fortinet,
+Palo Alto GlobalProtect и Palo Alto PAN-OS Admin. Логика каждого профиля задаёт
+HTTP-пути, схемы, обязательные маркеры, политику `any/all`, HTTP-статусы и
+проверку title.
+
+Проверенная логика Fortinet перенесена из `/home/kali/turbo/debug_scan_2.0_.sh`:
 
 ```text
 paths: /remote/login, /remote/index, /ssl-vpn/login.html
@@ -54,6 +75,9 @@ GET, timeout 5, follow redirects, 500 threads
 
 ## Результат
 
-`httpx_results` хранит URL, статус, title, webserver, заголовки, тело ответа, найденные признаки и номер HTTPX-чанка. Экспорт отдаёт уникальные результаты с `matched=true`, например `https://192.0.2.10:10443`.
+`httpx_results` хранит URL, статус, title, webserver, заголовки, тело ответа,
+найденные признаки и номер HTTPX-чанка. Экспорт отдаёт только уникальные
+результаты с `matched=true`, то есть подтверждённые `ip(2)`, например
+`https://192.0.2.10:10443`.
 
 Redis является сигналом пробуждения. Реестр control DB остаётся источником истины: task-runner подбирает `queued` TASK после потери события. Ошибка чанка не создаёт результат; чанк остаётся `failed` и может быть повторён.
