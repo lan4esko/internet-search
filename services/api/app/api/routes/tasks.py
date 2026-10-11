@@ -626,7 +626,17 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
     try:
         counts = await connection.fetchrow("""
           SELECT (SELECT count(*) FROM task_targets) AS targets,
+                 (SELECT count(*) FROM task_cidrs) AS cidrs,
+                 (SELECT count(DISTINCT source_chunk_no) FROM task_targets) AS target_chunks,
+                 (SELECT count(*) FROM task_targets WHERE masscan_status='pending') AS targets_pending,
+                 (SELECT count(*) FROM task_targets WHERE masscan_status='open') AS targets_open,
+                 (SELECT count(*) FROM task_targets WHERE masscan_status='closed') AS targets_closed,
+                 (SELECT count(*) FROM task_targets WHERE masscan_status='failed') AS targets_failed,
                  (SELECT count(*) FROM task_open_ports) AS ports,
+                 (SELECT count(*) FROM task_open_ports WHERE httpx_status='pending') AS ports_pending,
+                 (SELECT count(*) FROM task_open_ports WHERE httpx_status='running') AS ports_running,
+                 (SELECT count(*) FROM task_open_ports WHERE httpx_status='completed') AS ports_completed,
+                 (SELECT count(*) FROM task_open_ports WHERE httpx_status='failed') AS ports_failed,
                  (SELECT count(*) FROM httpx_results) AS results,
                  (SELECT count(*) FROM httpx_results WHERE matched=true) AS matched_results,
                  (SELECT count(*) FROM task_targets WHERE masscan_status='open') AS open_targets,
@@ -688,6 +698,38 @@ async def get_task(task_id: int, session: AsyncSession = Depends(get_session)):
             "matched": int(counts["httpx_matched_count"] or 0),
         },
         "events": int(counts["event_count"] or 0),
+    }
+    result["pipeline"] = {
+        "scope": {
+            "cidrs": int(counts["cidrs"] or 0),
+            "targets": total,
+            "chunks": int(counts["target_chunks"] or 0),
+            "pending": int(counts["targets_pending"] or 0),
+            "open": int(counts["targets_open"] or 0),
+            "closed": int(counts["targets_closed"] or 0),
+            "failed": int(counts["targets_failed"] or 0),
+        },
+        "masscan": {
+            "chunks": result["masscan_chunks"],
+            "open_ports": int(counts["ports"] or 0),
+            "found": int(counts["masscan_found_count"] or 0),
+            "packets_sent": int(counts["masscan_packets_sent"] or 0),
+            "average_rate_pps": round(float(counts["masscan_avg_rate"] or 0), 2),
+        },
+        "httpx": {
+            "chunks": result["httpx_chunks"],
+            "input_open_ports": int(counts["ports"] or 0),
+            "pending": int(counts["ports_pending"] or 0),
+            "running": int(counts["ports_running"] or 0),
+            "completed": int(counts["ports_completed"] or 0),
+            "failed": int(counts["ports_failed"] or 0),
+            "responses": int(counts["httpx_response_count"] or 0),
+            "matched": int(counts["httpx_matched_count"] or 0),
+        },
+        "results": {
+            "responses": int(counts["httpx_response_count"] or 0),
+            "confirmed": int(counts["matched_results"] or 0),
+        },
     }
     return result
 
