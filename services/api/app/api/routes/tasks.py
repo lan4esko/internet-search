@@ -81,12 +81,12 @@ FINGERPRINT_DEFAULTS = {
     },
 }
 MASSCAN_FORMATS = {"json", "list", "xml"}
-MASSCAN_RESERVED_ARGS = {"--includefile", "--ports", "--rate", "--output-format", "--output-filename"}
+MASSCAN_RESERVED_ARGS = {"--includefile", "--ports", "--rate", "--output-format", "--output-filename", "--wait", "--retries"}
 HTTPX_RESERVED_ARGS = {
     "-list", "-output", "-o", "-json", "-silent", "-no-color", "-disable-update-check",
     "-no-fallback-scheme", "-include-response", "-threads", "-timeout", "-follow-redirects",
     "-follow-host-redirects", "-path", "-match-string", "-rate-limit", "-status-code", "-title",
-    "-content-type", "-web-server", "-response-time",
+    "-content-type", "-content-length", "-web-server", "-response-time",
 }
 
 
@@ -135,6 +135,22 @@ def _integer(value, field: str, minimum: int, maximum: int, default=None) -> int
     if result < minimum or result > maximum:
         raise HTTPException(status_code=422, detail=f"{field}: допустимый диапазон {minimum}..{maximum}")
     return result
+
+
+def _boolean(value, field: str, default: bool = False) -> bool:
+    """Parse HTML/API booleans without treating the string 'false' as true."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise HTTPException(status_code=422, detail=f"{field}: ожидается true или false")
 
 
 def _string_list(value, field: str, default: list[str] | None = None) -> list[str]:
@@ -224,12 +240,28 @@ def normalize_config(payload: dict) -> dict:
         raw_title_contains = nested_httpx.get("title_contains")
     title_default = fingerprint_defaults.get("title_contains", [])
     title_contains = _string_list(raw_title_contains, "httpx_title_contains", title_default) if (raw_title_contains is not None or title_default) else []
+    httpx_method = str(payload.get("httpx_method", nested_httpx.get("method", "GET")) or "GET").upper()
+    if httpx_method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS", "DELETE"}:
+        raise HTTPException(status_code=422, detail="httpx_method: поддерживаются GET, HEAD, POST, PUT, PATCH, OPTIONS и DELETE")
     httpx_config = {
         "paths": paths,
         "schemes": schemes,
         "threads": _integer(payload.get("httpx_threads", nested_httpx.get("threads")), "httpx_threads", 1, 2_000, int(os.getenv("HTTPX_THREADS", "500"))),
         "timeout": _integer(payload.get("httpx_timeout", nested_httpx.get("timeout")), "httpx_timeout", 1, 120, int(os.getenv("HTTPX_TIMEOUT", "5"))),
-        "follow_redirects": bool(payload.get("httpx_follow_redirects", nested_httpx.get("follow_redirects", True))),
+        "method": httpx_method,
+        "probe": _boolean(payload.get("httpx_probe", nested_httpx.get("probe")), "httpx_probe", False),
+        "follow_redirects": _boolean(payload.get("httpx_follow_redirects", nested_httpx.get("follow_redirects")), "httpx_follow_redirects", True),
+        "follow_host_redirects": _boolean(payload.get("httpx_follow_host_redirects", nested_httpx.get("follow_host_redirects")), "httpx_follow_host_redirects", True),
+        "status_code": _boolean(payload.get("httpx_status_code", nested_httpx.get("status_code")), "httpx_status_code", True),
+        "title": _boolean(payload.get("httpx_title", nested_httpx.get("title")), "httpx_title", True),
+        "content_type": _boolean(payload.get("httpx_content_type", nested_httpx.get("content_type")), "httpx_content_type", True),
+        "content_length": _boolean(payload.get("httpx_content_length", nested_httpx.get("content_length")), "httpx_content_length", True),
+        "web_server": _boolean(payload.get("httpx_web_server", nested_httpx.get("web_server")), "httpx_web_server", True),
+        "response_time": _boolean(payload.get("httpx_response_time", nested_httpx.get("response_time")), "httpx_response_time", True),
+        "include_response": _boolean(payload.get("httpx_include_response", nested_httpx.get("include_response")), "httpx_include_response", True),
+        "tech_detect": _boolean(payload.get("httpx_tech_detect", nested_httpx.get("tech_detect")), "httpx_tech_detect", False),
+        "response_size_to_read": _integer(payload.get("httpx_response_size_to_read", nested_httpx.get("response_size_to_read")), "httpx_response_size_to_read", 1, 10_485_760, 262_144),
+        "response_size_to_save": _integer(payload.get("httpx_response_size_to_save", nested_httpx.get("response_size_to_save")), "httpx_response_size_to_save", 1, 10_485_760, 262_144),
         "match_strings": match_strings,
         "match_policy": match_policy,
         "status_codes": status_codes,
@@ -263,14 +295,29 @@ def command_preview(config: dict) -> dict[str, list[str]]:
         "--output-filename", "{OUTPUT_FILE}", "--wait", "5", "--retries", "0",
         *config["masscan_extra_args"],
     ]
-    httpx = [
-        "httpx", "-list", "{OPEN_ENDPOINTS_FILE}", "-output", "{OUTPUT_JSONL}", "-json", "-silent",
-        "-no-color", "-disable-update-check", "-no-fallback-scheme", "-include-response",
-        "-threads", str(config["httpx"]["threads"]), "-timeout", str(config["httpx"]["timeout"]),
-        "-follow-redirects", "-follow-host-redirects", "-path", ",".join(config["httpx"]["paths"]),
-        "-status-code", "-title", "-content-type", "-web-server", "-response-time",
-        *sum((["-match-string", value] for value in config["httpx"]["match_strings"]), []),
-    ]
+    httpx = ["httpx", "-list", "{OPEN_ENDPOINTS_FILE}", "-output", "{OUTPUT_JSONL}", "-json", "-silent",
+             "-no-color", "-disable-update-check", "-no-fallback-scheme"]
+    httpx_config = config["httpx"]
+    if httpx_config.get("include_response", True):
+        httpx.append("-include-response")
+    if httpx_config.get("probe"):
+        httpx.append("-probe")
+    httpx.extend(["-threads", str(httpx_config["threads"]), "-timeout", str(httpx_config["timeout"])])
+    if httpx_config.get("follow_redirects", True):
+        httpx.append("-follow-redirects")
+    if httpx_config.get("follow_host_redirects", True):
+        httpx.append("-follow-host-redirects")
+    httpx.extend(["-path", ",".join(httpx_config["paths"])])
+    for key, flag in (("status_code", "-status-code"), ("title", "-title"), ("content_type", "-content-type"),
+                      ("content_length", "-content-length"), ("web_server", "-web-server"),
+                      ("response_time", "-response-time"), ("tech_detect", "-tech-detect")):
+        if httpx_config.get(key, True):
+            httpx.append(flag)
+    if httpx_config.get("method", "GET") != "GET":
+        httpx.extend(["-x", httpx_config["method"]])
+    httpx.extend(["-response-size-to-read", str(httpx_config.get("response_size_to_read", 262_144)),
+                  "-response-size-to-save", str(httpx_config.get("response_size_to_save", 262_144))])
+    httpx.extend(sum((["-match-string", value] for value in httpx_config["match_strings"]), []))
     if config["httpx"].get("rate_limit"):
         httpx.extend(["-rate-limit", str(config["httpx"]["rate_limit"])])
     httpx.extend(config["httpx_extra_args"])
@@ -372,6 +419,22 @@ async def create_task(
     httpx_workers: int = Form(1, ge=1, le=64),
     httpx_rate_limit: int | None = Form(None, ge=1, le=100_000),
     httpx_extra_args: str | None = Form(None),
+    httpx_threads: int | None = Form(None, ge=1, le=2_000),
+    httpx_timeout: int | None = Form(None, ge=1, le=120),
+    httpx_method: str | None = Form(None),
+    httpx_probe: str | None = Form(None),
+    httpx_follow_redirects: str | None = Form(None),
+    httpx_follow_host_redirects: str | None = Form(None),
+    httpx_status_code: str | None = Form(None),
+    httpx_title: str | None = Form(None),
+    httpx_content_type: str | None = Form(None),
+    httpx_content_length: str | None = Form(None),
+    httpx_web_server: str | None = Form(None),
+    httpx_response_time: str | None = Form(None),
+    httpx_include_response: str | None = Form(None),
+    httpx_tech_detect: str | None = Form(None),
+    httpx_response_size_to_read: int | None = Form(None, ge=1, le=10_485_760),
+    httpx_response_size_to_save: int | None = Form(None, ge=1, le=10_485_760),
     httpx_paths: str = Form(json.dumps(FORTINET_PATHS)),
     httpx_schemes: str = Form('["http", "https"]'),
     fingerprint_id: str = Form("fortinet-debug-scan-2.0"),
@@ -396,6 +459,22 @@ async def create_task(
         "httpx_workers": httpx_workers,
         "httpx_rate_limit": httpx_rate_limit,
         "httpx_extra_args": httpx_extra_args,
+        "httpx_threads": httpx_threads,
+        "httpx_timeout": httpx_timeout,
+        "httpx_method": httpx_method,
+        "httpx_probe": httpx_probe,
+        "httpx_follow_redirects": httpx_follow_redirects,
+        "httpx_follow_host_redirects": httpx_follow_host_redirects,
+        "httpx_status_code": httpx_status_code,
+        "httpx_title": httpx_title,
+        "httpx_content_type": httpx_content_type,
+        "httpx_content_length": httpx_content_length,
+        "httpx_web_server": httpx_web_server,
+        "httpx_response_time": httpx_response_time,
+        "httpx_include_response": httpx_include_response,
+        "httpx_tech_detect": httpx_tech_detect,
+        "httpx_response_size_to_read": httpx_response_size_to_read,
+        "httpx_response_size_to_save": httpx_response_size_to_save,
         "httpx_paths": httpx_paths,
         "httpx_schemes": httpx_schemes,
         "fingerprint_id": fingerprint_id,

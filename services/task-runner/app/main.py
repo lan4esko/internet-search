@@ -286,13 +286,30 @@ async def claim_httpx(connection: asyncpg.Connection, chunk_size: int) -> tuple[
 
 def httpx_command(input_path: Path, output_path: Path, config: dict) -> list[str]:
     command = ["httpx", "-list", str(input_path), "-output", str(output_path), "-json", "-silent", "-no-color",
-               "-disable-update-check", "-no-fallback-scheme", "-include-response", "-threads", str(config["threads"]),
-               "-timeout", str(config["timeout"]), "-follow-redirects", "-follow-host-redirects",
-               "-path", ",".join(config["paths"]), "-status-code", "-title", "-content-type", "-web-server", "-response-time"]
+               "-disable-update-check", "-no-fallback-scheme"]
+    if config.get("include_response", True):
+        command.append("-include-response")
+    if config.get("probe"):
+        command.append("-probe")
+    command.extend(["-threads", str(config["threads"]), "-timeout", str(config["timeout"])])
+    if config.get("follow_redirects", True):
+        command.append("-follow-redirects")
+    if config.get("follow_host_redirects", True):
+        command.append("-follow-host-redirects")
+    command.extend(["-path", ",".join(config["paths"])])
+    for key, flag in (("status_code", "-status-code"), ("title", "-title"), ("content_type", "-content-type"),
+                      ("content_length", "-content-length"), ("web_server", "-web-server"),
+                      ("response_time", "-response-time"), ("tech_detect", "-tech-detect")):
+        if config.get(key, True):
+            command.append(flag)
     for value in config["match_strings"]:
         command.extend(["-match-string", value])
     if config.get("rate_limit"):
         command.extend(["-rate-limit", str(config["rate_limit"])])
+    if config.get("method", "GET") != "GET":
+        command.extend(["-x", config["method"]])
+    command.extend(["-response-size-to-read", str(config.get("response_size_to_read", 262_144)),
+                    "-response-size-to-save", str(config.get("response_size_to_save", 262_144))])
     command.extend(config.get("extra_args") or [])
     return command
 
