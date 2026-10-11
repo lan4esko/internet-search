@@ -494,10 +494,17 @@ async def list_tasks(
     rows = (await session.execute(select(TaskRegistry).order_by(TaskRegistry.id.desc()).limit(limit).offset(offset))).scalars().all()
     items = []
     for row in rows:
-        item = TaskRead.model_validate(row).model_dump()
-        if row.status == "completed":
-            item["progress_percent"] = 100.0
-        items.append(item)
+        # Keep the list view consistent with /tasks/{id}: progress and counters
+        # live in the physical TASK database, not only in task_registry.
+        try:
+            items.append(await get_task(row.id, session))
+        except Exception:
+            # A provisioning/failed TASK can briefly exist before its physical
+            # database is available. Preserve the registry row in that case.
+            item = TaskRead.model_validate(row).model_dump()
+            if row.status == "completed":
+                item["progress_percent"] = 100.0
+            items.append(item)
     return {"items": items, "total": int(total or 0), "limit": limit, "offset": offset}
 
 

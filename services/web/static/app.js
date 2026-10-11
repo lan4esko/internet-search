@@ -85,7 +85,7 @@
   function renderStats(task) {
     const stats = task.stats || {}; const masscan = stats.masscan || {}; const httpx = stats.httpx || {};
     const values = [["IP в scope", stats.targets ?? task.target_count], ["Открытые порты", stats.open_ports ?? task.open_port_count], ["Masscan пакеты", masscan.packets_sent ?? 0], ["Masscan найдено", masscan.found_count ?? 0], ["HTTPX ответов", httpx.responses ?? 0], ["Fortinet совпадений", httpx.matched ?? task.result_count]];
-    const box = $("task-stats"); box.replaceChildren(); values.forEach(([label, value]) => { const card = document.createElement("div"); card.className = "stat-card"; const title = document.createElement("span"); title.textContent = label; const number = document.createElement("strong"); number.textContent = formatNumber(value); card.append(title, number); box.append(card); });
+    const box = $("task-stats"); if (!box) return; box.replaceChildren(); values.forEach(([label, value]) => { const card = document.createElement("div"); card.className = "stat-card"; const title = document.createElement("span"); title.textContent = label; const number = document.createElement("strong"); number.textContent = formatNumber(value); card.append(title, number); box.append(card); });
   }
   function renderDetail(task) {
     const selected = state.tasks.findIndex((item) => item.id === task.id);
