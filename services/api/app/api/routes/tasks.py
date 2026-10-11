@@ -36,12 +36,36 @@ TASK_DATA_DIR = Path(os.getenv("SCOPE_DATA_DIR", "/data/scope")) / "tasks"
 UPLOAD_CHUNK = 1024 * 1024
 FORTINET_PATHS = ["/remote/login", "/remote/index", "/ssl-vpn/login.html"]
 FORTINET_MATCH_STRINGS = ["ftnt-fortinet-grid", 'name="magic"', "SVPNCOOKIE"]
+PALO_ALTO_PATHS = ["/global-protect/login.esp"]
+PALO_ALTO_MATCH_STRINGS = [
+    "GlobalProtect Portal",
+    'id="login_form"',
+    'name="prot"',
+    "/global-protect/portal/css/login.css",
+    "/global-protect/portal/images/logo-pan-",
+    'id="heading"',
+]
+FINGERPRINT_DEFAULTS = {
+    "fortinet-debug-scan-2.0": {
+        "paths": FORTINET_PATHS,
+        "match_strings": FORTINET_MATCH_STRINGS,
+        "match_policy": "any",
+    },
+    "paloalto-globalprotect-portal": {
+        "paths": PALO_ALTO_PATHS,
+        "match_strings": PALO_ALTO_MATCH_STRINGS,
+        "match_policy": "all",
+        "status_codes": [200],
+        "title_contains": ["GlobalProtect Portal"],
+    },
+}
 MASSCAN_FORMATS = {"json", "list", "xml"}
 MASSCAN_RESERVED_ARGS = {"--includefile", "--ports", "--rate", "--output-format", "--output-filename"}
 HTTPX_RESERVED_ARGS = {
     "-list", "-output", "-o", "-json", "-silent", "-no-color", "-disable-update-check",
     "-no-fallback-scheme", "-include-response", "-threads", "-timeout", "-follow-redirects",
-    "-follow-host-redirects", "-path", "-match-string", "-rate-limit",
+    "-follow-host-redirects", "-path", "-match-string", "-rate-limit", "-status-code", "-title",
+    "-content-type", "-web-server", "-response-time",
 }
 
 
@@ -104,11 +128,40 @@ def _string_list(value, field: str, default: list[str] | None = None) -> list[st
     return value
 
 
+def _integer_list(value, field: str, default: list[int] | None = None) -> list[int]:
+    if value is None or value == "":
+        value = default or []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise HTTPException(status_code=422, detail=f"{field}: нужен JSON-массив чисел") from error
+    if not isinstance(value, list) or any(isinstance(item, bool) for item in value):
+        raise HTTPException(status_code=422, detail=f"{field}: нужен массив чисел")
+    result = []
+    for item in value:
+        try:
+            number = int(item)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=f"{field}: ожидаются коды HTTP") from error
+        if number < 100 or number > 599:
+            raise HTTPException(status_code=422, detail=f"{field}: код HTTP должен быть 100..599")
+        result.append(number)
+    return sorted(set(result))
+
+
 def normalize_config(payload: dict) -> dict:
     """Validate UI/template values and produce the one canonical TASK config."""
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="config: нужен JSON-объект")
     nested_httpx = payload.get("httpx") if isinstance(payload.get("httpx"), dict) else {}
+    raw_fingerprint = payload.get("fingerprint_id", nested_httpx.get("fingerprint_id"))
+    if raw_fingerprint is None and isinstance(payload.get("fingerprint"), str):
+        raw_fingerprint = payload["fingerprint"]
+    fingerprint_id = str(raw_fingerprint or "fortinet-debug-scan-2.0").strip().lower()
+    fingerprint_defaults = FINGERPRINT_DEFAULTS.get(fingerprint_id)
+    if fingerprint_defaults is None:
+        raise HTTPException(status_code=422, detail=f"Неизвестный fingerprint: {fingerprint_id}")
     raw_ports = payload.get("masscan_ports")
     if isinstance(raw_ports, list):
         raw_ports = ",".join(str(item) for item in raw_ports)
@@ -123,7 +176,7 @@ def normalize_config(payload: dict) -> dict:
     output_format = str(payload.get("masscan_output_format", "json"))
     if output_format not in MASSCAN_FORMATS:
         raise HTTPException(status_code=422, detail="masscan_output_format: json, list или xml")
-    paths = _string_list(payload.get("httpx_paths", nested_httpx.get("paths")), "httpx_paths", FORTINET_PATHS)
+    paths = _string_list(payload.get("httpx_paths", nested_httpx.get("paths")), "httpx_paths", fingerprint_defaults["paths"])
     schemes = _string_list(payload.get("httpx_schemes", nested_httpx.get("schemes")), "httpx_schemes", ["http", "https"])
     if any(scheme not in {"http", "https"} for scheme in schemes):
         raise HTTPException(status_code=422, detail="httpx_schemes допускает только http и https")
@@ -133,13 +186,30 @@ def normalize_config(payload: dict) -> dict:
         rate_limit = None
     if rate_limit is not None:
         rate_limit = _integer(rate_limit, "httpx_rate_limit", 1, 100_000)
+    match_strings = _string_list(
+        payload.get("httpx_match_strings", nested_httpx.get("match_strings")),
+        "httpx_match_strings", fingerprint_defaults["match_strings"],
+    )
+    raw_match_policy = payload.get("httpx_match_policy") or nested_httpx.get("match_policy") or fingerprint_defaults.get("match_policy", "any")
+    match_policy = str(raw_match_policy).lower()
+    if match_policy not in {"any", "all"}:
+        raise HTTPException(status_code=422, detail="httpx_match_policy допускает только any или all")
+    status_codes = _integer_list(payload.get("httpx_status_codes", nested_httpx.get("status_codes", fingerprint_defaults.get("status_codes"))), "httpx_status_codes")
+    raw_title_contains = payload.get("httpx_title_contains")
+    if raw_title_contains is None:
+        raw_title_contains = nested_httpx.get("title_contains")
+    title_default = fingerprint_defaults.get("title_contains", [])
+    title_contains = _string_list(raw_title_contains, "httpx_title_contains", title_default) if (raw_title_contains is not None or title_default) else []
     httpx_config = {
         "paths": paths,
         "schemes": schemes,
         "threads": _integer(payload.get("httpx_threads", nested_httpx.get("threads")), "httpx_threads", 1, 2_000, int(os.getenv("HTTPX_THREADS", "500"))),
         "timeout": _integer(payload.get("httpx_timeout", nested_httpx.get("timeout")), "httpx_timeout", 1, 120, int(os.getenv("HTTPX_TIMEOUT", "5"))),
         "follow_redirects": bool(payload.get("httpx_follow_redirects", nested_httpx.get("follow_redirects", True))),
-        "match_strings": FORTINET_MATCH_STRINGS,
+        "match_strings": match_strings,
+        "match_policy": match_policy,
+        "status_codes": status_codes,
+        "title_contains": title_contains,
     }
     if rate_limit is not None:
         httpx_config["rate_limit"] = rate_limit
@@ -156,7 +226,7 @@ def normalize_config(payload: dict) -> dict:
         "httpx_workers": _integer(payload.get("httpx_workers", 1), "httpx_workers", 1, 64),
         "httpx": httpx_config,
         "httpx_extra_args": parse_extra_args(payload.get("httpx_extra_args", nested_httpx.get("extra_args")), "httpx_extra_args", HTTPX_RESERVED_ARGS),
-        "fingerprint": "fortinet-debug-scan-2.0",
+        "fingerprint": fingerprint_id,
     }
     config["commands"] = command_preview(config)
     return config
@@ -174,6 +244,7 @@ def command_preview(config: dict) -> dict[str, list[str]]:
         "-no-color", "-disable-update-check", "-no-fallback-scheme", "-include-response",
         "-threads", str(config["httpx"]["threads"]), "-timeout", str(config["httpx"]["timeout"]),
         "-follow-redirects", "-follow-host-redirects", "-path", ",".join(config["httpx"]["paths"]),
+        "-status-code", "-title", "-content-type", "-web-server", "-response-time",
         *sum((["-match-string", value] for value in config["httpx"]["match_strings"]), []),
     ]
     if config["httpx"].get("rate_limit"):
@@ -278,6 +349,11 @@ async def create_task(
     httpx_extra_args: str | None = Form(None),
     httpx_paths: str = Form(json.dumps(FORTINET_PATHS)),
     httpx_schemes: str = Form('["http", "https"]'),
+    fingerprint_id: str = Form("fortinet-debug-scan-2.0"),
+    httpx_match_strings: str | None = Form(None),
+    httpx_match_policy: str | None = Form(None),
+    httpx_status_codes: str | None = Form(None),
+    httpx_title_contains: str | None = Form(None),
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
     redis_client: Redis = Depends(get_redis),
@@ -297,6 +373,11 @@ async def create_task(
         "httpx_extra_args": httpx_extra_args,
         "httpx_paths": httpx_paths,
         "httpx_schemes": httpx_schemes,
+        "fingerprint_id": fingerprint_id,
+        "httpx_match_strings": httpx_match_strings,
+        "httpx_match_policy": httpx_match_policy,
+        "httpx_status_codes": httpx_status_codes,
+        "httpx_title_contains": httpx_title_contains,
     })
 
     database_name = f"task_{uuid4().hex}"

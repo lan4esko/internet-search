@@ -288,7 +288,7 @@ def httpx_command(input_path: Path, output_path: Path, config: dict) -> list[str
     command = ["httpx", "-list", str(input_path), "-output", str(output_path), "-json", "-silent", "-no-color",
                "-disable-update-check", "-no-fallback-scheme", "-include-response", "-threads", str(config["threads"]),
                "-timeout", str(config["timeout"]), "-follow-redirects", "-follow-host-redirects",
-               "-path", ",".join(config["paths"])]
+               "-path", ",".join(config["paths"]), "-status-code", "-title", "-content-type", "-web-server", "-response-time"]
     for value in config["match_strings"]:
         command.extend(["-match-string", value])
     if config.get("rate_limit"):
@@ -329,11 +329,18 @@ def parse_httpx_output(path: Path, chunk_no: int, config: dict) -> list[dict]:
                 evidence_parts.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
         evidence = "\n".join(evidence_parts)
         present = [value for value in config["match_strings"] if value in evidence]
+        policy = config.get("match_policy", "any")
+        marker_match = bool(present) if policy == "any" else bool(config["match_strings"]) and len(present) == len(config["match_strings"])
+        status_codes = {int(value) for value in config.get("status_codes", [])}
+        raw_status = payload.get("status_code", payload.get("status-code"))
+        status_match = not status_codes or (raw_status is not None and int(raw_status) in status_codes)
+        title = str(payload.get("title") or "")
+        title_match = all(value.lower() in title.lower() for value in config.get("title_contains", []))
         results.append({
             "ip": ip, "port": port, "protocol": parsed.scheme or "http", "url": f"{parsed.scheme}://{host}:{port}",
             "status_code": payload.get("status_code", payload.get("status-code")), "title": payload.get("title"),
             "webserver": payload.get("webserver"), "headers": payload.get("header", payload.get("headers", {})),
-            "body_preview": payload.get("body", payload.get("response")), "matched": bool(present),
+            "body_preview": payload.get("body", payload.get("response")), "matched": marker_match and status_match and title_match,
             "match_details": present, "httpx_chunk_no": chunk_no,
         })
     return results
