@@ -330,13 +330,14 @@ def command_preview(config: dict) -> dict[str, list[str]]:
                       ("response_time", "-response-time"), ("tech_detect", "-tech-detect")):
         if httpx_config.get(key, True):
             httpx.append(flag)
+    if httpx_config.get("rate_limit"):
+        httpx.extend(["-rate-limit", str(httpx_config["rate_limit"])])
     if httpx_config.get("method", "GET") != "GET":
         httpx.extend(["-x", httpx_config["method"]])
     httpx.extend(["-response-size-to-read", str(httpx_config.get("response_size_to_read", 262_144)),
                   "-response-size-to-save", str(httpx_config.get("response_size_to_save", 262_144))])
-    httpx.extend(sum((["-match-string", value] for value in httpx_config["match_strings"]), []))
-    if config["httpx"].get("rate_limit"):
-        httpx.extend(["-rate-limit", str(config["httpx"]["rate_limit"])])
+    # Fingerprint matching runs after HTTPX writes its unfiltered JSONL, so
+    # unmatched HTTP responses remain available for diagnostics.
     httpx.extend(config["httpx_extra_args"])
     return {"masscan": masscan, "httpx": httpx}
 

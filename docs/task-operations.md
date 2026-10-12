@@ -59,4 +59,17 @@ docker compose exec postgres psql -U app -d internet_search -c 'select id,name,s
 
 Если TASK остался в `queued`, task-runner подберёт его из control DB. Если чанк имеет `failed`, исправьте причину и вызовите `POST /api/tasks/{id}/retry`.
 
+Для завершённого TASK сохранённые HTTPX JSONL можно повторно оценить по его
+неизменённому fingerprint без сетевого сканирования. Сначала проверьте расчёт,
+затем примените его:
+
+```bash
+docker compose exec -T task-runner python -m app.reclassify 7
+docker compose exec -T task-runner python -m app.reclassify 7 --apply
+```
+
+Команда обновляет `matched`, число совпадений по HTTPX-чанкам и счётчик TASK.
+Она не создаёт ответы, отсутствующие в сохранённых JSONL, и откажется работать
+с незавершённой задачей.
+
 Поддерживается IPv4 и один PostgreSQL-сервис с отдельной физической базой на TASK. Панель по умолчанию доступна только localhost.

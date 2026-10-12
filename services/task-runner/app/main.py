@@ -12,8 +12,9 @@ import shutil
 import tempfile
 import time
 from collections import deque
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import asyncpg
 from redis.asyncio import Redis
@@ -31,6 +32,24 @@ ARTIFACT_ROOT = Path(os.getenv("SCOPE_DATA_DIR", "/data/scope")) / "tasks"
 GROUP = "task-runners"
 STREAM = "tasks.created"
 MASSCAN_OUTPUT_EXTENSIONS = {"json": "json", "list": "txt", "xml": "xml"}
+
+
+class ResponseResourcePaths(HTMLParser):
+    """Resolve HTML resource links against the page requested by HTTPX."""
+
+    def __init__(self, page_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.page_url = page_url
+        self.host = urlsplit(page_url).hostname
+        self.paths: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name not in {"src", "href"} or not value:
+                continue
+            resolved = urlsplit(urljoin(self.page_url, value))
+            if resolved.scheme in {"http", "https"} and resolved.hostname == self.host:
+                self.paths.add(resolved.path)
 
 
 def task_url(database_name: str) -> str:
@@ -302,8 +321,9 @@ def httpx_command(input_path: Path, output_path: Path, config: dict) -> list[str
                       ("response_time", "-response-time"), ("tech_detect", "-tech-detect")):
         if config.get(key, True):
             command.append(flag)
-    for value in config["match_strings"]:
-        command.extend(["-match-string", value])
+    # Keep every HTTP response in JSONL. The application evaluates the complete
+    # fingerprint, including relative HTML resource paths, after collection.
+    # CLI matchers would discard responses needed for diagnosis or matching.
     if config.get("rate_limit"):
         command.extend(["-rate-limit", str(config["rate_limit"])])
     if config.get("method", "GET") != "GET":
@@ -344,6 +364,11 @@ def parse_httpx_output(path: Path, chunk_no: int, config: dict) -> list[dict]:
             value = payload.get(key)
             if value is not None:
                 evidence_parts.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+        body = payload.get("body") or payload.get("response")
+        if isinstance(body, str):
+            resources = ResponseResourcePaths(url)
+            resources.feed(body)
+            evidence_parts.extend(sorted(resources.paths))
         evidence = "\n".join(evidence_parts)
         present = [value for value in config["match_strings"] if value in evidence]
         policy = config.get("match_policy", "any")
@@ -361,6 +386,24 @@ def parse_httpx_output(path: Path, chunk_no: int, config: dict) -> list[dict]:
             "match_details": present, "httpx_chunk_no": chunk_no,
         })
     return results
+
+
+def results_for_chunk(results: list[dict], rows: list[asyncpg.Record]) -> list[dict]:
+    """Keep only responses tied to Masscan endpoints claimed by this chunk."""
+    allowed = {(row["ip"], row["port"]) for row in rows}
+    return [result for result in results if (result["ip"], result["port"]) in allowed]
+
+
+def best_endpoint_results(results: list[dict]) -> list[dict]:
+    """Keep one row per endpoint without losing a match on another HTTP path."""
+    chosen = {}
+    for result in results:
+        key = (result["ip"], result["port"], result["protocol"], result["url"])
+        previous = chosen.get(key)
+        score = (bool(result["matched"]), len(result["match_details"]))
+        if previous is None or score > (bool(previous["matched"]), len(previous["match_details"])):
+            chosen[key] = result
+    return list(chosen.values())
 
 
 async def process_httpx_chunk(connection: asyncpg.Connection, task_id: int, chunk_no: int, rows: list[asyncpg.Record], config: dict) -> None:
@@ -387,7 +430,11 @@ async def process_httpx_chunk(connection: asyncpg.Connection, task_id: int, chun
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.exists():
             shutil.copyfile(output_path, raw_path)
-        results = parse_httpx_output(output_path, chunk_no, config)
+        responses = parse_httpx_output(output_path, chunk_no, config)
+        # A redirect must not create ip(2) for an endpoint that Masscan never
+        # placed in this HTTPX chunk. Keep the raw JSONL for diagnosis.
+        responses = results_for_chunk(responses, rows)
+        results = best_endpoint_results(responses)
     async with connection.transaction():
         if returncode == 0:
             for result in results:
@@ -397,9 +444,9 @@ async def process_httpx_chunk(connection: asyncpg.Connection, task_id: int, chun
                     result["ip"], result["port"], result["protocol"], result["url"], result["status_code"], result["title"], result["webserver"], json.dumps(result["headers"] or {}), result["body_preview"], result["matched"], json.dumps(result["match_details"]), chunk_no)
             await connection.execute("UPDATE task_open_ports SET httpx_status='completed' WHERE httpx_chunk_no=$1", chunk_no)
             matched_count = sum(1 for result in results if result["matched"])
-            await connection.execute("UPDATE task_chunks SET status='completed',response_count=$2,matched_count=$3,status_tail=$4,finished_at=now(),raw_output_path=$5,raw_output_bytes=$6 WHERE stage='httpx' AND chunk_no=$1", chunk_no, len(results), matched_count, tail, str(raw_path), raw_path.stat().st_size if raw_path.exists() else 0)
-            await emit_event(connection, "httpx", f"HTTPX завершил чанк {chunk_no}: ответов {len(results)}", payload={
-                "chunk": chunk_no, "responses": len(results), "matched": matched_count, "artifact": str(raw_path),
+            await connection.execute("UPDATE task_chunks SET status='completed',response_count=$2,matched_count=$3,status_tail=$4,finished_at=now(),raw_output_path=$5,raw_output_bytes=$6 WHERE stage='httpx' AND chunk_no=$1", chunk_no, len(responses), matched_count, tail, str(raw_path), raw_path.stat().st_size if raw_path.exists() else 0)
+            await emit_event(connection, "httpx", f"HTTPX завершил чанк {chunk_no}: ответов {len(responses)}", payload={
+                "chunk": chunk_no, "responses": len(responses), "matched": matched_count, "artifact": str(raw_path),
             })
         else:
             await connection.execute("UPDATE task_open_ports SET httpx_status='failed',httpx_ready=true WHERE httpx_chunk_no=$1", chunk_no)
