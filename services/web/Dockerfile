@@ -1,4 +1,4 @@
 FROM nginx:1.27-alpine
 
-COPY services/web/nginx.conf /etc/nginx/conf.d/default.conf
-COPY services/web/static /usr/share/nginx/html
+COPY --chmod=0755 services/web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --chmod=0755 services/web/static /usr/share/nginx/html

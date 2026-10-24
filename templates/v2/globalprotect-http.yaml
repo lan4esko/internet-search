@@ -1,0 +1,14 @@
+version: 1
+id: globalprotect-http
+name: GlobalProtect Portal HTTP confirmation
+classification:
+  product: paloalto-globalprotect
+  on_match: http_confirmed
+  maximum_tier: http_confirmed
+match:
+  all:
+    - {field: http.status_code, op: equals, value: 200}
+    - {field: http.path, op: equals, value: /global-protect/login.esp}
+    - {field: http.body, op: contains, value: GlobalProtect Portal}
+    - {field: http.body, op: contains, value: 'id="login_form"'}
+    - {field: http.body, op: contains, value: 'name="prot"'}

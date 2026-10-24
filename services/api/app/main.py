@@ -7,8 +7,10 @@ from app.api.routes.metrics import router as metrics_router
 from app.api.routes.tasks import router as tasks_router
 from app.api.routes.tasks import templates_router
 from app.redis import redis_lifespan
+from app.api.routes.v2 import router as v2_router
 
 app = FastAPI(title="Internet Search API", lifespan=redis_lifespan)
+app.include_router(v2_router)
 app.include_router(metrics_router)
 app.include_router(tasks_router)
 app.include_router(templates_router)

@@ -19,6 +19,8 @@ async def main():
     c=await asyncpg.connect(os.environ['DATABASE_URL'].replace('+asyncpg',''))
     try:
         counts={'active_tasks': await c.fetchval("SELECT count(*) FROM task_registry WHERE status IN ('provisioning','queued','running')")}
+        if await c.fetchval("SELECT to_regclass('public.v2_tasks') IS NOT NULL"):
+            counts['active_v2_tasks']=await c.fetchval("SELECT count(*) FROM v2_tasks WHERE status IN ('provisioning','queued','running','cancelling')")
         print(json.dumps(counts))
     finally:
         await c.close()

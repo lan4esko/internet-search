@@ -62,7 +62,7 @@ services:
       retries: 10
 
   # The task runner is the real pipeline for the current TASK model. It owns
-  # Masscan and HTTPX subprocesses and connects to the physical database of
+  # ZMap and ZGrab2 subprocesses and connects to the physical database of
   # the TASK it claims from Redis.
   task-runner:
     build:
@@ -77,9 +77,15 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?Generate .env with python3 scripts/bootstrap.py --init-only}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      MASSCAN_WORKERS: ${MASSCAN_WORKERS:-1}
-      HTTPX_WORKERS: ${HTTPX_WORKERS:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; from redis import Redis; assert Redis.from_url(os.getenv('REDIS_URL','redis://redis:6379/0')).exists('v2:worker:'+socket.gethostname()+':heartbeat')"]
+      interval: 5s
+      timeout: 3s
+      retries: 4
+      start_period: 10s
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -144,14 +150,39 @@ services:
     init: true
     restart: unless-stopped
 
+  lab:
+    image: ${COMPOSE_PROJECT_NAME:-internet-search}-api
+    profiles: ["lab"]
+    entrypoint: ["python", "/lab_service.py"]
+    volumes:
+      - ./tests/v2/lab_service.py:/lab_service.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: "no"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.2
+    profiles: ["monitoring"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    command: ["--docker_only=true", "--housekeeping_interval=5s"]
+    restart: unless-stopped
+
   # Optional observability stack. It is started only with --profile monitoring.
   prometheus:
-    image: prom/prometheus:v2.54.1
+    build:
+      context: .
+      dockerfile: monitoring/Dockerfile.prometheus
     profiles: ["monitoring"]
     ports:
       - "${PROMETHEUS_BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-29090}:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -165,7 +196,9 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:11.2.0
+    build:
+      context: .
+      dockerfile: monitoring/Dockerfile.grafana
     profiles: ["monitoring"]
     ports:
       - "${GRAFANA_BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-23000}:3000"
@@ -175,8 +208,6 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       prometheus:
         condition: service_started

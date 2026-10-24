@@ -1,0 +1,80 @@
+{
+  "uid": "is-v2-pipeline",
+  "title": "Internet Search 2 \u00b7 Pipeline",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "tags": [
+    "internet-search",
+    "v2"
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Queue",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "internet-search-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "internet_search_v2_endpoints_queued",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "TLS",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "internet-search-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "internet_search_v2_observations_tls",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "HTTP",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "internet-search-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "internet_search_v2_observations_http",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -464,6 +464,7 @@ async def create_task(
     session: AsyncSession = Depends(get_session),
     redis_client: Redis = Depends(get_redis),
 ):
+    raise HTTPException(status_code=410,detail='Используйте POST /v2/tasks: обработчик v1 выведен из runtime.')
     if not name.strip():
         raise HTTPException(status_code=422, detail="Название TASK не может быть пустым")
     config = normalize_config({
@@ -848,6 +849,7 @@ async def get_events(
 
 @router.post("/{task_id}/retry", response_model=dict)
 async def retry_chunk(task_id: int, payload: TaskRetry, session: AsyncSession = Depends(get_session), redis_client: Redis = Depends(get_redis)):
+    raise HTTPException(status_code=410,detail='Создайте TASK v2; runtime v1 отключён.')
     task = await task_or_404(task_id, session)
     if task.status in {"provisioning", "running"}:
         raise HTTPException(status_code=409, detail="Активный TASK нельзя перезапустить")

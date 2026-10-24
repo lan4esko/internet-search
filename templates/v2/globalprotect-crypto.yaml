@@ -1,0 +1,13 @@
+version: 1
+id: globalprotect-crypto
+name: GlobalProtect research dataset (requires independent calibration)
+datasets:
+  approved_spki_sha256: []
+classification:
+  product: paloalto-globalprotect
+  on_match: crypto_candidate
+  maximum_tier: crypto_candidate
+match:
+  field: tls.spki_sha256
+  op: in
+  dataset: approved_spki_sha256

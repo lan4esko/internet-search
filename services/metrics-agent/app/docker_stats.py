@@ -8,9 +8,9 @@ import socket
 from urllib.parse import urlencode
 
 
-SERVICES = frozenset({"web", "api", "postgres", "redis", "task-runner", "metrics-agent", "metrics-proxy"})
+SERVICES = frozenset({"web", "api", "postgres", "redis", "task-runner", "metrics-agent", "metrics-proxy", "cadvisor", "prometheus", "grafana"})
 METRIC_FIELDS = ("cpu_percent", "memory_usage_bytes", "memory_limit_bytes", "memory_percent",
-                 "pids", "network_rx_bytes", "network_tx_bytes", "block_read_bytes", "block_write_bytes")
+                 "pids", "network_rx_bytes", "network_tx_bytes", "block_read_bytes", "block_write_bytes", "rss_bytes")
 
 
 def now():
@@ -73,11 +73,19 @@ class DockerStats:
         item = {"service": container["Labels"]["com.docker.compose.service"],
                 "name": (container.get("Names") or [identity[:12]])[0].lstrip("/")[:128],
                 "state": str(container.get("State", "unknown"))[:32],
-                "sampled_at": None, **dict.fromkeys(METRIC_FIELDS)}
+                "sampled_at": None, "health": None, "restart_count": None, "uptime_seconds": None, **dict.fromkeys(METRIC_FIELDS)}
         if item["state"] != "running":
             self.previous.pop(identity, None)
             return item
         try:
+            inspect=self._api(f"/containers/{identity}/json")
+            state=inspect.get('State') or {}
+            item['health']=(state.get('Health') or {}).get('Status')
+            item['restart_count']=nonnegative(inspect.get('RestartCount'))
+            started=state.get('StartedAt')
+            if started:
+                try:item['uptime_seconds']=max(0,(datetime.now(timezone.utc)-datetime.fromisoformat(started.replace('Z','+00:00'))).total_seconds())
+                except ValueError:pass
             stats = self._api(f"/containers/{identity}/stats?stream=false&one-shot=true")
             item.update(metric_values(stats, self.previous.get(identity)))
             item["sampled_at"] = now()
@@ -117,6 +125,7 @@ def metric_values(stats, previous=None):
     memory = stats.get("memory_stats") or {}
     usage, limit = nonnegative(memory.get("usage")), nonnegative(memory.get("limit"))
     details = memory.get("stats") or {}
+    values["rss_bytes"]=nonnegative(details.get("rss",details.get("anon")))
     cache = nonnegative(details.get("total_inactive_file"))
     if cache is None:
         cache = nonnegative(details.get("inactive_file"))

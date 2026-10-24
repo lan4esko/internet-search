@@ -1,0 +1,59 @@
+{
+  "uid": "is-v2-database",
+  "title": "Internet Search 2 \u00b7 Database",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "tags": [
+    "internet-search",
+    "v2"
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Durable endpoints",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "internet-search-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "internet_search_v2_endpoints_total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Observations",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "internet-search-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "internet_search_v2_observations_http",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -36,6 +36,7 @@ class Compose:
         self.command = ["docker", "compose", "--project-directory", str(ROOT),
                         "--env-file", str(self.env_file)]
         if project_name:
+            self.environment["COMPOSE_PROJECT_NAME"] = project_name
             self.command += ["--project-name", project_name]
 
     def run(self, *arguments, **kwargs):

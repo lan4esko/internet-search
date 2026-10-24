@@ -24,6 +24,10 @@ class ContainerMetric(BaseModel):
     memory_usage_bytes: int | None = Field(default=None, ge=0)
     memory_limit_bytes: int | None = Field(default=None, ge=0)
     memory_percent: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    rss_bytes: int | None = Field(default=None, ge=0)
+    health: str | None = Field(default=None, max_length=32)
+    restart_count: int | None = Field(default=None, ge=0)
+    uptime_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     pids: int | None = Field(default=None, ge=0)
     network_rx_bytes: int | None = Field(default=None, ge=0)
     network_tx_bytes: int | None = Field(default=None, ge=0)
@@ -130,4 +134,19 @@ async def prometheus_metrics(
     for status, count in task_statuses:
         safe_status = str(status).replace('"', "")
         lines.append(f'internet_search_tasks_total{{status="{safe_status}"}} {int(count)}')
+    from scanlib.v2 import database as v2_store
+    connection=await v2_store.control()
+    try:
+        statuses=await connection.fetch('SELECT status,count(*) count FROM v2_tasks GROUP BY status')
+        recent=await connection.fetch('SELECT id FROM v2_tasks ORDER BY id DESC LIMIT 100')
+    finally:await connection.close()
+    lines += ['# TYPE internet_search_v2_tasks gauge']
+    for row in statuses:lines.append(f'internet_search_v2_tasks{{status="{row["status"]}"}} {row["count"]}')
+    for row in recent:
+        raw=await redis.get(f'v2:{row["id"]}:stats')
+        if not raw:continue
+        snapshot=json.loads(raw)
+        for section in ['coverage','endpoints','observations','classifications']:
+            for key,value in snapshot.get(section,{}).items():
+                if value is not None:lines.append(f'internet_search_v2_{section}_{key}{{task_id="{row["id"]}"}} {float(value)}')
     return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")

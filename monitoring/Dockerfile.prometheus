@@ -1,0 +1,2 @@
+FROM prom/prometheus:v2.54.1
+COPY --chmod=0644 monitoring/prometheus.yml /etc/prometheus/prometheus.yml
