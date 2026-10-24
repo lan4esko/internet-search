@@ -20,6 +20,10 @@ class TaskPanelBrowserTests(TestCase):
             raise SkipTest("Для браузерной проверки нужен Python playwright")
         chromium = shutil.which("chromium")
         if not chromium:
+            with sync_playwright() as paths:
+                candidate=paths.chromium.executable_path
+                chromium=candidate if Path(candidate).is_file() else None
+        if not chromium:
             raise SkipTest("Для браузерной проверки нужен Chromium")
         try:
             cls.playwright = sync_playwright().start()
@@ -55,7 +59,7 @@ class TaskPanelBrowserTests(TestCase):
     def route(self, route):
         parsed = urlsplit(route.request.url)
         if not parsed.path.startswith("/api/"):
-            files = {"/": "index.html", "/app.js": "app.js", "/styles.css": "styles.css"}
+            files = {"/": "legacy.html", "/app.js": "app.js", "/styles.css": "styles.css"}
             filename = files.get(parsed.path)
             if not filename:
                 route.fulfill(status=404, body="missing")

@@ -1,95 +1,72 @@
-# Internet Search
+# Internet Search 2.0 — восстановленная сборка
 
-Рабочий конвейер идентификации разрешённых IPv4-целей:
+Это исходники v2, восстановленные из изменений в переписке после утраты предыдущей облачной среды. Архив не является побайтовой копией прежней среды. Он содержит код и инструкции запуска; пароли, базы, результаты сканирования, Git metadata и Python/Docker caches не включены. Результаты проверок этой конкретной сборки находятся в `VALIDATION.md`.
 
-```text
-CIDR TXT → отдельная БД TASK → IP-чанки → Masscan
-                              → открытые IP:PORT → HTTPX
-                              → vendor fingerprint → protocol://ip:port
-```
+Основной runtime: **CIDR → ScopeCompiler → ZMap → PostgreSQL outbox → Redis Streams → ZGrab2 → TLS/HTTP normalization → YAML evidence → SSE/UI/exports**. Masscan и HTTPX больше не запускаются новым worker. CIDR не разворачивается в миллионы IP-строк.
 
-Приложение использует Docker Compose, PostgreSQL, Redis, Masscan и ProjectDiscovery HTTPX. Runtime не создаёт моковых результатов.
+## Запуск после скачивания
 
-## TASK и физическая база
-
-Каждый запуск создаётся из одного неизменяемого CIDR-файла. В control-базе `internet_search` хранится реестр, после чего PostgreSQL создаёт отдельную физическую базу `task_<uuid>`.
-
-В task-базе:
-
-- `task_targets` — все IP из CIDR, включая network и broadcast; `ip` является primary key;
-- `task_chunks` — состояние Masscan и HTTPX чанков;
-- `task_open_ports` — только порты, подтверждённые Masscan;
-- `httpx_results` — реальные HTTPX-ответы и совпадения выбранного fingerprint.
-
-Параметры `masscan_chunk_size` и `httpx_chunk_size` задаются отдельно. Числа Masscan и HTTPX workers задаются при создании TASK. Подробная спецификация: [docs/task-pipeline.md](docs/task-pipeline.md).
-
-## Запуск
-
-Требуются Docker Engine с Compose v2, Python 3.10+ и разрешённая сеть.
+1. Распакуйте ZIP.
+2. Откройте терминал в распакованной папке `internet-search-v2.0`.
+3. На Linux с установленными Docker Engine, Docker Compose v2 и Python 3.10+ выполните:
 
 ```bash
 python3 scripts/bootstrap.py
+```
+
+Первичная сборка скачивает зависимости. Bootstrap создаёт локальный `.env` с правами 0600, применяет миграции и запускает сервисы. Пароли в исходники вводить не нужно.
+
+На своём компьютере откройте `http://127.0.0.1:28280`. API: `http://127.0.0.1:28210`, OpenAPI: `/docs` на порту API.
+
+Загрузите разрешённый IPv4 CIDR TXT, проверьте scope без трафика, затем создайте TASK. Для реального ZMap discovery машине нужны raw IPv4 networking и корректные interface/source IP/gateway. Обычный HTTP/SOCKS proxy не заменяет raw-сеть ZMap.
+
+## Реализовано
+
+- Immutable source, allowlist, mandatory/user denylist, SHA-256 manifest и повторная pre-probe проверка.
+- Физическая PostgreSQL-база на TASK, ledger `PORT × SHARD`, уникальные endpoints `IP:PORT:SNI`.
+- Spool на диске, transactional outbox, consumer groups, retries/DLQ и идемпотентное восстановление после restart.
+- ZMap 2.1.1 и ZGrab2 v0.2.0; TLS/X.509/HTTP normalization с ограниченным размером тела.
+- YAML rules: AND/OR/NOT, datasets, regex timeout, положительные/отрицательные признаки, score и maximum tier.
+- Криптографические совпадения ограничены `crypto_candidate`; HTTP подтверждается отдельным правилом. SPKI dataset GlobalProtect пустой до независимой калибровки.
+- Direct/source-IP/CONNECT/SOCKS5 egress. Прокси получает числовой проверенный адрес; нет fallback на direct и следования redirects.
+- Панель задач, SSE, evidence, pagination и live CSV/JSONL snapshots с watermark/SHA-256.
+- Container telemetry; дополнительный стек cAdvisor/Prometheus/Grafana и семь dashboards.
+- Backup/restore, безопасная проверка tar/checksum и CI с локальной лабораторией.
+
+## Повторный запуск и обновление
+
+```bash
 docker compose up -d --wait
 ```
 
-Панель: `http://127.0.0.1:28280`. API: `http://127.0.0.1:28210`. Конфигурация создаётся в `.env` с правами `0600` и не перезаписывается.
+Для обновления сначала завершите TASK, сделайте backup и остановите application services:
 
-Создание TASK выполняется в панели: укажите имя и CIDR-файл, затем откройте отдельные
-кнопки «Параметры Masscan» и «Параметры HTTPX». В этих модальных окнах настраиваются
-параметры worker-ов, а ниже сразу видна итоговая argv-команда. HTTPX здесь означает
-ProjectDiscovery HTTPX внутри task-runner; Python-клиент `httpx` из хостовой Kali не
-используется. API также доступен через `POST /api/tasks`.
-
-Профили поиска сохраняются кнопкой «Сохранить шаблон» в control-БД и могут быть
-загружены перед созданием TASK. Кнопка «Тест конфигурации» открывает dry-run:
-параметры, argv и выбранный CIDR-файл проверяются без запуска Masscan/HTTPX и без
-отправки сетевых пакетов. API этих операций: `/api/templates` и
-`/api/templates/validate`.
-В том же окне есть явная кнопка реального ограниченного теста: она сначала
-выбирает указанное число корректных подсетей, затем создаёт TASK с префиксом
-`[TEST]` и запускает штатный Masscan → HTTPX конвейер.
-
-Каждый TASK открывается отдельной вкладкой. Внутри вкладки доступны прогресс
-этапов, открытые `IP:PORT`, совпадения выбранного fingerprint, IP-чанки, нагрузка контейнеров
-сводка пакетов Masscan, ответов HTTPX, совпадений и сохранённые argv-команды. Формат Masscan и дополнительные аргументы обоих
-инструментов задаются до запуска; аргументы передаются напрямую процессу без
-shell, а флаги, которыми управляет сам конвейер, отклоняются.
-
-Для отдельного мониторинга Prometheus и Grafana предусмотрен профиль Compose:
-`docker compose --profile monitoring up -d prometheus grafana`. Prometheus
-забирает `/api/operations/prometheus`, а Grafana автоматически получает готовый
-дашборд CPU, памяти, сети контейнеров и количества TASK по состояниям. Порты по
-умолчанию: Prometheus `29090`, Grafana `23000`; bootstrap генерирует пароль
-Grafana в локальном `.env`.
-
-## Fortinet fingerprint
-
-В первой рабочей версии используется проверенная логика `/home/kali/turbo/debug_scan_2.0_.sh`:
-
-```text
-/remote/login,/remote/index,/ssl-vpn/login.html
-ftnt-fortinet-grid
-name="magic"
-SVPNCOOKIE
+```bash
+python3 scripts/backup.py backups/before-update
+docker compose stop web api task-runner metrics-agent metrics-proxy
+python3 scripts/bootstrap.py
 ```
 
-HTTPX получает только Masscan-открытые `IP:PORT`. Экспорт TASK содержит уникальные строки `http://ip:port` или `https://ip:port`.
+Не удаляйте volumes при обновлении. Миграция `0003_v2` сохраняет v1 registry и базы. Старый UI доступен на `/legacy.html`; создание/повтор TASK v1 возвращают HTTP 410.
 
-## Palo Alto fingerprints
+## Тесты
 
-Профиль `Palo Alto GlobalProtect` проверяет `/global-protect/login.esp` и
-маркеры GlobalProtect Portal. Профиль `Palo Alto PAN-OS Admin` проверяет
-`/php/login.php` и требует полный набор признаков из административной страницы:
-`window.Pan`, `Panos.browser`, `panos-panos-login.js`,
-`/styles/login/css/login-admin.css`,
-`/login/images/panw_new_logo_302_53.png`, `id="login_form"`,
-`name="authType"` и `name="challengeCookie"` при HTTP 200. Заголовки браузера,
-`PHPSESSID` и дата ответа в правило не входят.
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r services/api/requirements.txt -r services/task-runner/requirements.txt -r tests/browser/requirements.txt
+.venv/bin/python -m playwright install --with-deps chromium
+.venv/bin/python scripts/test_v2.py --restart-test --browser
+python3 scripts/benchmark_v2.py
+```
 
-## Документация
+`test_v2.py` использует только локальный Docker fixture. Он временно разрешает его точный `/32`, затем удаляет исключение в `finally`. Не запускайте при активных рабочих TASK: тест перезапускает worker/API.
 
-- [Техническое ТЗ и схема TASK](docs/task-pipeline.md)
-- [Эксплуатация и API](docs/task-operations.md)
-- [Развёртывание](docs/deployment.md)
-- [Архитектура](docs/architecture.md)
-- [Диагностика](docs/scanner-diagnosis.md)
+## Мониторинг
+
+```bash
+docker compose --profile monitoring up -d cadvisor prometheus grafana
+```
+
+Prometheus: локальный порт 29090; Grafana: 23000, admin password генерируется в `.env`. Docker Engine socket доступен только узкому readonly metrics-proxy; API его не получает.
+
+Подробности: [архитектура, API и DSL](docs/v2/implementation.md), [backup/restore](docs/v2/operations.md), [границы проверки](VALIDATION.md). Старые документы вне `docs/v2` описывают v1.

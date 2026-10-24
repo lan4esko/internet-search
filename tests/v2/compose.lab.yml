@@ -1,0 +1,4 @@
+services:
+  api:
+    environment:
+      V2_LAB_CIDRS: ${V2_LAB_CIDRS:?Set this to the exact Docker lab fixture IPv4 /32}
