@@ -7,7 +7,7 @@
 ## Запуск после скачивания
 
 1. Распакуйте ZIP.
-2. Откройте терминал в распакованной папке `internet-search-v2.0`.
+2. Откройте терминал в распакованной папке проекта: `internet-search-v2.0` для архива из чата или `internet-search-main` для ZIP с GitHub.
 3. На Linux с установленными Docker Engine, Docker Compose v2 и Python 3.10+ выполните:
 
 ```bash
